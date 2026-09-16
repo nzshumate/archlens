@@ -1,0 +1,14 @@
+{
+  "boundaries": [
+    {
+      "from": "src/components/",
+      "disallow": "src/server/",
+      "message": "UI components must not depend directly on server infrastructure"
+    },
+    {
+      "from": "src/domain/",
+      "disallow": "src/components/",
+      "message": "Domain code must remain independent of UI components"
+    }
+  ]
+}
