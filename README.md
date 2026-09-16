@@ -21,6 +21,7 @@ Architecture analysis is filesystem-, parsing-, and graph-heavy work. Rust gives
 - Builds a directed module dependency graph
 - Detects circular dependency groups
 - Emits graph nodes and edges as JSON for visualization and integrations
+- Runs formatting, Clippy, and tests in GitHub Actions
 
 ## Install and run
 
@@ -96,6 +97,7 @@ archlens dev                  Launch the interactive architecture explorer
 - [x] Circular dependency detection
 - [x] Basic `tsconfig` aliases
 - [x] JSON graph output
+- [x] GitHub Actions validation
 - [ ] Dynamic `import()` and CommonJS AST support
 - [ ] Full JSONC/extended tsconfig resolution
 - [ ] Workspace/package resolution
