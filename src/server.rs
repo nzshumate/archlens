@@ -1,4 +1,4 @@
-use crate::{analyzer, git, metrics, rules};
+use crate::{advice, analyzer, git, metrics, rules};
 use anyhow::{Context, Result};
 use std::{
     io::{Read, Write},
@@ -13,9 +13,10 @@ fn report(root: &Path, base: Option<&str>) -> Result<String> {
     let config = rules::load(root)?;
     let metrics = metrics::calculate(&analysis, &config)?;
     let violations = rules::evaluate(&analysis, &config);
+    let guidance = advice::build(&analysis, &metrics, &config, &violations);
     let diff = base.map(|b| git::diff(root, b, &analysis)).transpose()?;
     Ok(serde_json::to_string(
-        &serde_json::json!({"schema_version":1,"analysis":analysis,"metrics":metrics,"violations":violations,"diff":diff}),
+        &serde_json::json!({"schema_version":1,"project":root.file_name().unwrap_or_default().to_string_lossy(),"analysis":analysis,"metrics":metrics,"violations":violations,"diff":diff,"guidance":guidance}),
     )?)
 }
 fn respond(mut stream: TcpStream, root: &Path, base: Option<&str>) -> Result<()> {

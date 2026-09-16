@@ -10,6 +10,7 @@ Written in Rust. Runs locally. No Node.js runtime or cloud service required.
 
 - **Dependency analysis** — static imports, re-exports, literal dynamic imports, and CommonJS calls, with per-package TypeScript aliases, workspace exports, and project ignore rules.
 - **Architecture checks** — dependency cycles, heavily connected modules, unreachable modules from configured entry points, module size, and a health score.
+- **Prioritized findings** — understand why each finding matters, inspect the affected files and actual imports, and follow a suggested next step. Scores include their calculation and limitations.
 - **Actionable diagnostics** — surface parse errors and unresolved internal imports; export machine-readable CI results.
 - **Boundary enforcement** — define allowed layers and fail CI when a dependency crosses a prohibited boundary.
 - **Git impact reports** — added and removed dependencies, new cycles, deleted modules, and transitively affected importers.
@@ -48,7 +49,7 @@ Open its architecture explorer:
 oxarch dev /path/to/frontend
 ```
 
-Visit [localhost:4242](http://127.0.0.1:4242). Select a module to inspect its imports and importers, search by path, or filter for cycles. Use **Refresh analysis** after editing source files.
+Visit [localhost:4242](http://127.0.0.1:4242). Start with **Recommended next steps**; select a file in a finding to inspect its dependencies. Expand **How to interpret this report** for scope, entry points, boundary coverage, and the score calculation. Select a module to inspect its imports and importers, search by path, or filter for cycles. Use **Refresh analysis** after editing source files.
 
 ## CLI
 
@@ -57,6 +58,7 @@ All commands accept a project path; it defaults to the current directory.
 | Command | Purpose |
 | --- | --- |
 | `oxarch analyze [path]` | Summarize dependencies and architecture health |
+| `oxarch analyze [path] --details` | Show every finding, affected file, and supporting evidence |
 | `oxarch analyze [path] --json` | Export the graph, metrics, and violations |
 | `oxarch analyze [path] --no-cache` | Analyze without reading or writing the parser cache |
 | `oxarch check [path] --min-health 80` | Enforce health, boundaries, and absence of cycles |
@@ -65,6 +67,8 @@ All commands accept a project path; it defaults to the current directory.
 | `oxarch diff <base> [path] --json` | Report architectural changes since the branch merge base |
 | `oxarch dev [path] --base main` | Explore dependencies with branch-impact overlays |
 | `oxarch dev [path] --port 4242` | Choose the explorer's local port |
+
+Text analysis and check reports show the first five prioritized findings. Use `--details` for all findings; JSON always includes the full structured `guidance` object. A candidate is a prompt to investigate, not proof that code should be removed.
 
 Use `oxarch --help` or `oxarch <command> --help` for command options.
 

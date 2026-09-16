@@ -50,6 +50,16 @@ Framework detection requires `next` or `expo` in a discovered package's dependen
 
 Analyze, check, explorer, and diff JSON have `schema_version: 1`. Consumers should tolerate additional fields. Diff includes diagnostics from both snapshots and `analysis_complete`, so a partial base graph is visible too.
 
+## Actionable reports
+
+Analyze, check, and explorer reports share a `guidance` object: a plain-language summary, reachability scope, boundary-rule coverage, score explanation, entry points, and ordered findings. Each finding has `kind`, `priority`, `title`, `why`, `action`, `files`, and `evidence`. Analysis problems come first, followed by boundary violations, cycle groups, large files, and reachability candidates. Script/test classification uses path conventions and is explicitly tentative.
+
+Cycle evidence lists actual directed imports within the cycle group, not a fabricated cycle order. Large-file findings name the file, measured line count, and 300-line review threshold. Candidate findings explain entry-point limitations and do not prescribe deletion. With no boundary rules, reports say boundaries were not checked. `metrics.score_penalties` exposes the exact cycle, unused-candidate, and large-file deductions; no scoring thresholds or CI pass/fail rules were changed by these explanations.
+
+Text analyze/check output limits the default view to five findings and four files/evidence items per finding, with explicit omission counts. `--details` displays everything, including entry points; JSON never truncates findings. The dashboard offers **Show all findings**, expandable file/evidence lists, and file buttons that focus the graph and module details. Refresh failures label the previous report as potentially stale.
+
+Diff reports include `next_steps` explaining cycle-group changes, import changes, and which affected modules to test. These are review suggestions, not predictions of runtime failure. The CLI shows actual added/removed edges and a bounded affected-module preview; use JSON for the complete lists.
+
 ## Incremental cache
 
 Every normal analysis maintains `target/oxarch/parsed-v2.json` inside the analyzed project. Add `target/` to that project's `.gitignore` if needed.

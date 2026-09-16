@@ -10,8 +10,15 @@ pub struct ArchitectureMetrics {
     pub hubs: Vec<ModuleMetric>,
     pub large_modules: Vec<ModuleComplexity>,
     pub health_score: u8,
+    pub score_penalties: ScorePenalties,
     pub entry_points: Vec<String>,
     pub reachability_mode: String,
+}
+#[derive(Debug, Serialize)]
+pub struct ScorePenalties {
+    pub cycles: usize,
+    pub unused_candidates: usize,
+    pub large_modules: usize,
 }
 #[derive(Debug, Serialize)]
 pub struct ModuleMetric {
@@ -111,8 +118,13 @@ pub fn calculate(report: &AnalysisReport, config: &RulesConfig) -> Result<Archit
         .collect::<Vec<_>>();
     large_modules.sort_by(|a, b| b.lines.cmp(&a.lines).then_with(|| a.module.cmp(&b.module)));
     let cycle_nodes = report.cycles.iter().flatten().collect::<HashSet<_>>().len();
+    let score_penalties = ScorePenalties {
+        cycles: (cycle_nodes * 5).min(45),
+        unused_candidates: dead_candidates.len().min(20),
+        large_modules: large_modules.len().min(15),
+    };
     let penalty =
-        (cycle_nodes * 5).min(45) + dead_candidates.len().min(20) + large_modules.len().min(15);
+        score_penalties.cycles + score_penalties.unused_candidates + score_penalties.large_modules;
     let health_score = 100usize.saturating_sub(penalty) as u8;
     Ok(ArchitectureMetrics {
         orphan_modules,
@@ -120,6 +132,7 @@ pub fn calculate(report: &AnalysisReport, config: &RulesConfig) -> Result<Archit
         hubs,
         large_modules,
         health_score,
+        score_penalties,
         entry_points,
         reachability_mode: if explicit {
             "explicit"

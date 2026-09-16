@@ -4,6 +4,10 @@
 
 ### Added
 
+- Prioritized, explainable findings shared by the CLI, JSON, and dashboard, with file links and next steps.
+- Transparent score deductions, explicit boundary-rule coverage, and full CLI output through `--details`.
+- Branch-impact next steps and actual import evidence for cycle groups.
+
 - Installed-package TypeScript configuration extensions, including hoisted/scoped configs and multiple bases.
 - Next.js/Expo entry-point detection and framework-aware reachability.
 - Narrow handling of expected generated Next.js type references.

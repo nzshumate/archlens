@@ -42,6 +42,9 @@ with tempfile.TemporaryDirectory(prefix='oxarch-http-') as directory:
         assert first['schema_version'] == 1
         assert first['analysis']['source_files'] == 1 and first['diff'] is None
         assert first['analysis']['diagnostics'] == []
+        assert first['guidance']['boundary_rule_count'] == 0
+        assert 'not checked' in first['guidance']['boundaries']
+        assert first['project'] == root.name
         (root / 'main.ts').write_text("import './new';")
         (root / 'new.ts').write_text('export {};')
         second = json.loads(request('/api/report')[2])
@@ -53,6 +56,8 @@ with tempfile.TemporaryDirectory(prefix='oxarch-http-') as directory:
         assert diagnostic['metrics']['reachability_mode'] == 'explicit'
         assert diagnostic['metrics']['dead_candidates'] == ['broken.ts', 'unused.ts']
         assert diagnostic['analysis']['diagnostics'][0]['code'] == 'parse_error'
+        assert diagnostic['guidance']['findings'][0]['kind'] == 'parse_error'
+        assert diagnostic['guidance']['findings'][0]['action']
         (root / '.oxarchignore').write_text('broken.ts\n')
         recovered = json.loads(request('/api/report')[2])
         assert recovered['analysis']['diagnostics'] == []

@@ -3,6 +3,7 @@ const $ = id => document.getElementById(id);
 const svgNS = 'http://www.w3.org/2000/svg';
 let data, selected = null, page = 0, viewport = [0, 0, 1000, 560], drag;
 const PAGE_SIZE = 100;
+let showAllFindings = false;
 function element(tag, text, parent, className) {
   const e = document.createElement(tag);
   if (text !== undefined) e.textContent = text;
@@ -24,15 +25,56 @@ async function refresh() {
     if (!r.ok) throw new Error(await r.text());
     data = await r.json(); if (selected && !data.analysis.nodes.includes(selected) && !(data.diff?.deleted_source_files || []).includes(selected)) selected = null; render();
     $('status').textContent = data.analysis.diagnostics.length || data.diff?.base_diagnostics?.length ? 'Analysis updated with diagnostics. Review the findings below.' : 'Analysis updated. Refresh after editing your source files.';
-  } catch (e) { $('status').textContent = `Analysis failed: ${e.message}`; }
+  } catch (e) { $('status').textContent = `Analysis failed: ${e.message}${data ? ' Previous report remains visible and may be stale.' : ''}`; }
   finally { $('refresh').disabled = false; }
 }
 function moduleButton(name, parent) {
   const b = element('button', name, parent); b.onclick = () => { selected = name; render(); }; return b;
 }
+function inspectFile(name) {
+  selected = name; page = 0; $('scope').value = 'all'; $('search').value = name;
+  render(); fit(); $('details').scrollIntoView({block: 'center'});
+}
+function renderGuidance(g) {
+  $('assessment').textContent = g.summary;
+  $('scope-explanation').textContent = g.scope;
+  $('boundary-explanation').textContent = g.boundaries;
+  $('score-explanation').textContent = g.score_explanation;
+  $('findings').replaceChildren();
+  const shown = showAllFindings ? g.findings : g.findings.slice(0, 5);
+  $('finding-count').textContent = g.findings.length ? `Showing ${shown.length} of ${g.findings.length} findings, ordered by what to address first.` : 'No next steps under the current checks.';
+  $('findings-toggle').hidden = g.findings.length <= 5;
+  $('findings-toggle').textContent = showAllFindings ? 'Show first 5 findings' : `Show all ${g.findings.length} findings`;
+  shown.forEach((f, i) => {
+    const article = element('article', undefined, $('findings'), `finding ${f.priority.replaceAll(' ', '-')}`);
+    element('span', f.priority, article, 'priority');
+    element('h3', `${i + 1}. ${f.title}`, article);
+    element('p', `Why it matters: ${f.why}`, article);
+    element('p', `Next step: ${f.action}`, article);
+    if (f.files.length) {
+      const files = element('details', undefined, article);
+      files.open = f.files.length <= 4;
+      element('summary', `${f.files.length} relevant file(s) — select one to inspect`, files);
+      const buttons = element('div', undefined, files, 'finding-files');
+      f.files.forEach(file => {
+        if (data.analysis.nodes.includes(file)) {
+          const button = element('button', file, buttons); button.onclick = () => inspectFile(file);
+        } else element('span', file, buttons);
+      });
+    }
+    if (f.evidence.length) {
+      const evidence = element('details', undefined, article); evidence.open = f.evidence.length <= 4;
+      element('summary', 'Supporting evidence', evidence);
+      const list = element('ul', undefined, evidence, 'finding-evidence');
+      f.evidence.forEach(item => element('li', item, list));
+    }
+  });
+}
 function render() {
   if (!data) return;
   const a = data.analysis, d = data.diff, m = data.metrics;
+  $('project-name').textContent = `Report for ${data.project}`;
+  renderGuidance(data.guidance);
   const unused = new Set(m.dead_candidates), cycles = new Set(a.cycles.flat()), changed = new Set(d?.changed_source_files || []), deleted = new Set(d?.deleted_source_files || []), affected = new Set(d?.affected_modules || []);
   const nodes = [...new Set([...a.nodes, ...deleted])].sort();
   const q = $('search').value.toLowerCase(), scope = $('scope').value;
@@ -43,14 +85,18 @@ function render() {
   const findings = [...a.diagnostics.map(diagnostic => ({...diagnostic, tree: 'Current'})), ...(d?.base_diagnostics || []).map(diagnostic => ({...diagnostic, tree: 'Base'}))];
   $('diagnostic-panel').hidden = !findings.length;
   for (const finding of findings) element('li', `${finding.tree}: ${finding.file}${finding.line ? `:${finding.line}:${finding.column}` : ''} [${finding.code}] ${finding.message}`, $('diagnostics'));
-  $('reachability').textContent = m.reachability_mode !== 'heuristic' ? `Reachability (${m.reachability_mode}) from: ${m.entry_points.join(', ')} · ${m.dead_candidates.length} unreachable candidates` : 'Unused-module candidates use filename heuristics. Set entryPoints in oxarch.json for graph reachability.';
+  $('reachability').textContent = m.entry_points.length ? 'Entry points used for this analysis:' : 'No explicit or framework entry points detected.';
+  $('entry-points').replaceChildren();
+  m.entry_points.forEach(file => element('li', file, $('entry-points')));
   $('cards').replaceChildren();
-  for (const [label, value] of [[a.diagnostics.length ? 'Health (incomplete analysis)' : 'Health', `${m.health_score}/100`], ['Modules', a.source_files], ['Dependencies', a.dependencies], ['Cycles', a.cycles.length], ['Boundary violations', data.violations.length]]) card($('cards'), label, value);
+  for (const [label, value] of [[a.diagnostics.length ? 'Review score (incomplete)' : 'Review score', `${m.health_score}/100`], ['Source files', a.source_files], ['Internal imports', a.dependencies], ['Cycle groups', a.cycles.length], ['Boundary violations', data.guidance.boundary_rule_count ? data.violations.length : 'Not configured']]) card($('cards'), label, value);
   $('impact').replaceChildren();
   $('changes').hidden = !d;
   if (d) {
     element('h2', `Branch impact vs ${d.base}`, $('impact'));
     element('p', `Compared with merge base ${d.merge_base.slice(0, 12)}; includes working-tree changes.`, $('impact'), 'muted');
+    const nextSteps = element('ul', undefined, $('impact'));
+    d.next_steps.forEach(step => element('li', step, nextSteps));
     const cards = element('div', undefined, $('impact'), 'cards');
     for (const [label, value] of [['Changed files', changed.size], ['Affected modules', affected.size], ['Added edges', d.added_edges.length], ['Removed edges', d.removed_edges.length], ['New cycles', d.new_cycles.length]]) card(cards, label, value);
   }
@@ -60,14 +106,14 @@ function render() {
   for (const n of visible) {
     const tr = element('tr', undefined, $('rows')); moduleButton(n, element('td', undefined, tr));
     element('td', outgoing.get(n) || 0, tr); element('td', incoming.get(n) || 0, tr);
-    element('td', deleted.has(n) ? 'Deleted' : changed.has(n) ? 'Changed' : cycles.has(n) ? 'Cycle' : affected.has(n) ? 'Affected' : 'Unchanged', tr);
+    element('td', deleted.has(n) ? 'Deleted' : changed.has(n) ? 'Changed' : cycles.has(n) ? 'Cycle' : affected.has(n) ? 'Affected' : m.entry_points.includes(n) ? 'Entry point' : unused.has(n) ? 'Review reachability' : d ? 'Unchanged' : 'Module', tr);
   }
   $('cycles').replaceChildren();
   for (const c of a.cycles) element('li', `Cycle group: ${c.join(', ')}`, $('cycles'));
   if (!a.cycles.length) element('li', 'No dependency cycles detected.', $('cycles'));
   $('violations').replaceChildren();
   for (const v of data.violations) element('li', `${v.from} → ${v.to}: ${v.message}`, $('violations'));
-  if (!data.violations.length) element('li', 'No boundary violations.', $('violations'));
+  if (!data.violations.length) element('li', data.guidance.boundaries, $('violations'));
   $('edge-changes').replaceChildren();
   for (const [kind, edges] of [['Added', d?.added_edges || []], ['Removed', d?.removed_edges || []]]) for (const e of edges) element('li', `${kind}: ${e.from} → ${e.to}`, $('edge-changes'), kind.toLowerCase());
   if (d && !d.added_edges.length && !d.removed_edges.length) element('li', 'No dependency changes.', $('edge-changes'));
@@ -82,6 +128,8 @@ function render() {
     if (m.entry_points.includes(selected)) element('p', m.reachability_mode === 'framework' ? 'Detected framework entry point' : 'Configured entry point', $('details'));
     if (unused.has(selected)) element('p', m.reachability_mode !== 'heuristic' ? 'Unreachable from analysis entry points' : 'Unused candidate (heuristic)', $('details'));
     element('p', deleted.has(selected) ? 'Deleted from the current tree' : `${a.lines[selected] || 0} ${(a.lines[selected] || 0) === 1 ? 'line' : 'lines'}`, $('details'));
+    const related = data.guidance.findings.filter(f => f.files.includes(selected));
+    for (const finding of related) { element('h3', finding.title, $('details')); element('p', finding.action, $('details')); }
     for (const [label, names] of [['Imports', a.edges.filter(e => e.from === selected).map(e => e.to)], ['Imported by', a.edges.filter(e => e.to === selected).map(e => e.from)], ['Removed connections', (d?.removed_edges || []).filter(e => e.from === selected || e.to === selected).map(e => e.from === selected ? e.to : e.from)]]) {
       element('h3', label, $('details')); names.forEach(n => moduleButton(n, $('details'))); if (!names.length) element('p', 'None', $('details'), 'muted');
     }
@@ -146,6 +194,7 @@ $('graph').onpointerdown=e=>{if(e.target.closest('.node'))return;drag=[e.clientX
 $('graph').onpointermove=e=>{if(!drag)return;const rect=$('graph').getBoundingClientRect();const scale=Math.max(drag[4]/rect.width,drag[5]/rect.height);viewport=[drag[2]-(e.clientX-drag[0])*scale,drag[3]-(e.clientY-drag[1])*scale,drag[4],drag[5]];applyView();};
 $('graph').onpointerup=$('graph').onpointercancel=()=>{drag=null;};
 $('refresh').onclick=refresh;
+$('findings-toggle').onclick=()=>{showAllFindings=!showAllFindings;render();};
 $('search').oninput=$('scope').onchange=()=>{page=0;render();fit();};
 $('layout').onchange=()=>{render();fit();};
 $('fit').onclick=fit;$('zoom-in').onclick=()=>zoom(1/1.25);$('zoom-out').onclick=()=>zoom(1.25);

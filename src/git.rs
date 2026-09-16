@@ -11,6 +11,7 @@ use std::{
 #[derive(Debug, Serialize)]
 pub struct DiffReport {
     pub schema_version: u32,
+    pub next_steps: Vec<String>,
     pub base: String,
     pub analysis_complete: bool,
     pub base_diagnostics: Vec<AnalysisDiagnostic>,
@@ -172,14 +173,31 @@ pub fn diff(root: &Path, base: &str, report: &AnalysisReport) -> Result<DiffRepo
         .filter(|(from, to)| affected.contains(from) || affected.contains(to))
         .count();
     let base_cycles = base_report.cycles.iter().cloned().collect::<HashSet<_>>();
-    let new_cycles = report
+    let new_cycles: Vec<Vec<String>> = report
         .cycles
         .iter()
         .filter(|c| !base_cycles.contains(*c))
         .cloned()
         .collect();
+    let mut next_steps = Vec::new();
+    if !report.diagnostics.is_empty() || !base_report.diagnostics.is_empty() {
+        next_steps.push("Resolve diagnostics in both snapshots before trusting added/removed dependencies; incomplete parsing or resolution can look like architectural changes.".into());
+    }
+    if !new_cycles.is_empty() {
+        next_steps.push(format!("Review {} cycle group(s) absent from the base snapshot. Group membership can change when an existing cycle grows; inspect the actual imports before deciding what to refactor.", new_cycles.len()));
+    }
+    if !added_edges.is_empty() || !removed_edges.is_empty() {
+        next_steps.push("Review added and removed imports for intended dependency-direction changes. Check removed connections before deleting or moving their target modules.".into());
+    }
+    if !affected.is_empty() {
+        next_steps.push(format!("Run tests and type checks covering the {} affected module(s) and their entry points. Affected means changed or connected through importers, not necessarily broken.", affected.len()));
+    }
+    if next_steps.is_empty() {
+        next_steps.push("No source-graph impact detected. Runtime behavior and non-source changes still need normal testing.".into());
+    }
     Ok(DiffReport {
         schema_version: 1,
+        next_steps,
         analysis_complete: report.diagnostics.is_empty() && base_report.diagnostics.is_empty(),
         base_diagnostics: base_report.diagnostics.clone(),
         current_diagnostics: report.diagnostics.clone(),

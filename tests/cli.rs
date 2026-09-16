@@ -789,3 +789,109 @@ fn framework_detection_respects_package_boundaries_and_expo_main() {
         serde_json::json!(["packages/plain/app/page.tsx"])
     );
 }
+
+#[test]
+fn guidance_prioritizes_incomplete_analysis_and_uses_real_cycle_edges() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    write(root, "a.ts", "import './c'; import './missing';");
+    write(root, "b.ts", "import './a';");
+    write(root, "c.ts", "import './b';");
+    let result = analyze(root, true);
+    let g = &result["guidance"];
+    assert_eq!(g["findings"][0]["kind"], "unresolved_import");
+    let cycle = g["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["kind"] == "cycle")
+        .unwrap();
+    assert_eq!(
+        cycle["evidence"],
+        serde_json::json!([
+            "a.ts imports c.ts",
+            "b.ts imports a.ts",
+            "c.ts imports b.ts"
+        ])
+    );
+    assert!(g["summary"].as_str().unwrap().contains("incomplete"));
+    assert_eq!(g["boundary_rule_count"], 0);
+    assert!(g["boundaries"].as_str().unwrap().contains("not checked"));
+    let penalties = &result["metrics"]["score_penalties"];
+    assert_eq!(
+        100 - penalties["cycles"].as_u64().unwrap()
+            - penalties["unused_candidates"].as_u64().unwrap()
+            - penalties["large_modules"].as_u64().unwrap(),
+        result["metrics"]["health_score"].as_u64().unwrap()
+    );
+}
+
+#[test]
+fn guidance_distinguishes_tooling_candidates_and_explains_large_files() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    write(root, "main.ts", "export {};");
+    write(root, "oxarch.json", r#"{"entryPoints":["main.ts"]}"#);
+    write(root, "scripts/run.ts", "export {};");
+    write(root, "tests/domain.test.ts", "export {};");
+    write(root, "unused.ts", "export {};\n".repeat(305).as_str());
+    let result = analyze(root, true);
+    let findings = result["guidance"]["findings"].as_array().unwrap();
+    let tooling = findings.iter().find(|f| f["kind"] == "tooling").unwrap();
+    assert_eq!(
+        tooling["files"],
+        serde_json::json!(["scripts/run.ts", "tests/domain.test.ts"])
+    );
+    assert!(tooling["action"]
+        .as_str()
+        .unwrap()
+        .contains("replaces automatic detection"));
+    assert!(tooling["action"]
+        .as_str()
+        .unwrap()
+        .contains("Do not delete"));
+    assert_eq!(findings[0]["kind"], "large_module");
+    assert_eq!(
+        findings[0]["evidence"],
+        serde_json::json!(["305 lines (threshold: 300)"])
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_oxarch"))
+        .args(["analyze", root.to_str().unwrap(), "--details"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(text.contains("Why:") && text.contains("Next:") && text.contains("scripts/run.ts"));
+    assert!(text.contains("Entry points used:"));
+}
+
+#[test]
+fn cli_bounds_findings_but_details_and_json_keep_every_finding() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    for i in 0..7 {
+        write(root, &format!("file{i}.ts"), "import './missing';");
+    }
+    let run = |extra: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_oxarch"))
+            .args(["analyze", root.to_str().unwrap()])
+            .args(extra)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).unwrap()
+    };
+    let short = run(&[]);
+    assert!(short.contains("Showing 5 of"));
+    assert!(!short.contains("File: file6.ts"));
+    let full = run(&["--details"]);
+    assert!(full.contains("File: file6.ts"));
+    assert!(!full.contains("Showing 5 of"));
+    assert!(
+        analyze(root, true)["guidance"]["findings"]
+            .as_array()
+            .unwrap()
+            .len()
+            >= 7
+    );
+}
