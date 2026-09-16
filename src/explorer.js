@@ -22,8 +22,8 @@ async function refresh() {
   try {
     const r = await fetch('/api/report', {cache: 'no-store'});
     if (!r.ok) throw new Error(await r.text());
-    data = await r.json(); render();
-    $('status').textContent = 'Analysis updated. Refresh after editing your source files.';
+    data = await r.json(); if (selected && !data.analysis.nodes.includes(selected) && !(data.diff?.deleted_source_files || []).includes(selected)) selected = null; render();
+    $('status').textContent = data.analysis.diagnostics.length || data.diff?.base_diagnostics?.length ? 'Analysis updated with diagnostics. Review the findings below.' : 'Analysis updated. Refresh after editing your source files.';
   } catch (e) { $('status').textContent = `Analysis failed: ${e.message}`; }
   finally { $('refresh').disabled = false; }
 }
@@ -33,14 +33,19 @@ function moduleButton(name, parent) {
 function render() {
   if (!data) return;
   const a = data.analysis, d = data.diff, m = data.metrics;
-  const cycles = new Set(a.cycles.flat()), changed = new Set(d?.changed_source_files || []), deleted = new Set(d?.deleted_source_files || []), affected = new Set(d?.affected_modules || []);
+  const unused = new Set(m.dead_candidates), cycles = new Set(a.cycles.flat()), changed = new Set(d?.changed_source_files || []), deleted = new Set(d?.deleted_source_files || []), affected = new Set(d?.affected_modules || []);
   const nodes = [...new Set([...a.nodes, ...deleted])].sort();
   const q = $('search').value.toLowerCase(), scope = $('scope').value;
-  const filtered = nodes.filter(n => n.toLowerCase().includes(q) && (scope === 'all' || (scope === 'cycles' ? cycles : scope === 'changed' ? changed : affected).has(n)));
+  const filtered = nodes.filter(n => n.toLowerCase().includes(q) && (scope === 'all' || (scope === 'unused' ? unused : scope === 'cycles' ? cycles : scope === 'changed' ? changed : affected).has(n)));
   page = Math.max(0, Math.min(page, Math.ceil(filtered.length / PAGE_SIZE) - 1));
   const visible = filtered.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
+  $('diagnostics').replaceChildren();
+  const findings = [...a.diagnostics.map(diagnostic => ({...diagnostic, tree: 'Current'})), ...(d?.base_diagnostics || []).map(diagnostic => ({...diagnostic, tree: 'Base'}))];
+  $('diagnostic-panel').hidden = !findings.length;
+  for (const finding of findings) element('li', `${finding.tree}: ${finding.file}${finding.line ? `:${finding.line}:${finding.column}` : ''} [${finding.code}] ${finding.message}`, $('diagnostics'));
+  $('reachability').textContent = m.reachability_mode === 'explicit' ? `Reachability from: ${m.entry_points.join(', ')} · ${m.dead_candidates.length} unreachable candidates` : 'Unused-module candidates use filename heuristics. Set entryPoints in oxarch.json for graph reachability.';
   $('cards').replaceChildren();
-  for (const [label, value] of [['Health', `${m.health_score}/100`], ['Modules', a.source_files], ['Dependencies', a.dependencies], ['Cycles', a.cycles.length], ['Boundary violations', data.violations.length]]) card($('cards'), label, value);
+  for (const [label, value] of [[a.diagnostics.length ? 'Health (incomplete analysis)' : 'Health', `${m.health_score}/100`], ['Modules', a.source_files], ['Dependencies', a.dependencies], ['Cycles', a.cycles.length], ['Boundary violations', data.violations.length]]) card($('cards'), label, value);
   $('impact').replaceChildren();
   $('changes').hidden = !d;
   if (d) {
@@ -70,8 +75,12 @@ function render() {
   draw(visible, edges, {cycles, changed, deleted, added, removed});
   $('graph-status').textContent = filtered.length ? `Showing ${page * PAGE_SIZE + 1}–${page * PAGE_SIZE + visible.length} of ${filtered.length} matching modules. Edges appear when both endpoints are on this page.` : 'No matching modules.';
   $('previous').disabled = page === 0; $('next').disabled = (page + 1) * PAGE_SIZE >= filtered.length;
+  $('details').replaceChildren();
+  if (!selected) { element('h2', 'Module details', $('details')); element('p', 'Select a graph node or a module below.', $('details')); }
   if (selected) {
-    $('details').replaceChildren(); element('h2', selected, $('details'));
+    element('h2', selected, $('details'));
+    if (m.entry_points.includes(selected)) element('p', 'Configured entry point', $('details'));
+    if (unused.has(selected)) element('p', m.reachability_mode === 'explicit' ? 'Unreachable from configured entry points' : 'Unused candidate (heuristic)', $('details'));
     element('p', deleted.has(selected) ? 'Deleted from the current tree' : `${a.lines[selected] || 0} ${(a.lines[selected] || 0) === 1 ? 'line' : 'lines'}`, $('details'));
     for (const [label, names] of [['Imports', a.edges.filter(e => e.from === selected).map(e => e.to)], ['Imported by', a.edges.filter(e => e.to === selected).map(e => e.from)], ['Removed connections', (d?.removed_edges || []).filter(e => e.from === selected || e.to === selected).map(e => e.from === selected ? e.to : e.from)]]) {
       element('h3', label, $('details')); names.forEach(n => moduleButton(n, $('details'))); if (!names.length) element('p', 'None', $('details'), 'muted');

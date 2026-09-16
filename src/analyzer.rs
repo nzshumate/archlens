@@ -1,4 +1,9 @@
-use crate::{cache, config::ResolverConfig, parser, workspace::Workspaces};
+use crate::{
+    cache,
+    config::{Configs, ResolverConfig},
+    discovery, parser,
+    workspace::Workspaces,
+};
 use anyhow::{Context, Result};
 use petgraph::{algo::kosaraju_scc, graph::NodeIndex, Graph};
 use rayon::prelude::*;
@@ -8,8 +13,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
-use walkdir::WalkDir;
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct AnalysisReport {
     pub files_scanned: usize,
     pub source_files: usize,
@@ -18,6 +22,15 @@ pub struct AnalysisReport {
     pub nodes: Vec<String>,
     pub edges: Vec<DependencyEdge>,
     pub lines: HashMap<String, usize>,
+    pub diagnostics: Vec<AnalysisDiagnostic>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct AnalysisDiagnostic {
+    pub file: String,
+    pub code: String,
+    pub message: String,
+    pub line: Option<usize>,
+    pub column: Option<usize>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct DependencyEdge {
@@ -38,27 +51,14 @@ pub fn analyze_with_cache(root: &Path, use_cache: bool) -> Result<AnalysisReport
     } else {
         cache::Cache::default()
     };
-    let config = ResolverConfig::load(root);
-    let workspaces = Workspaces::discover(root);
-    let mut files = Vec::new();
-    let mut files_scanned = 0;
-    for entry in WalkDir::new(root).into_iter().filter_entry(|e| {
-        let n = e.file_name().to_string_lossy();
-        !matches!(
-            n.as_ref(),
-            "node_modules" | ".git" | "dist" | "build" | ".next" | ".nuxt" | "coverage" | "target"
-        )
-    }) {
-        let entry = entry?;
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        files_scanned += 1;
-        if is_source(entry.path()) {
-            files.push(entry.path().to_path_buf());
-        }
-    }
-    files.sort();
+    let all_files = discovery::files(root)?;
+    let configs = Configs::load(root, &all_files)?;
+    let workspaces = Workspaces::discover(&all_files)?;
+    let files_scanned = all_files.len();
+    let files = all_files
+        .into_iter()
+        .filter(|path| is_source(path))
+        .collect::<Vec<_>>();
     let parsed = files
         .par_iter()
         .map(|f| {
@@ -70,10 +70,14 @@ pub fn analyze_with_cache(root: &Path, use_cache: bool) -> Result<AnalysisReport
                 .get(&key)
                 .filter(|entry| entry.source == source)
                 .cloned()
-                .unwrap_or_else(|| cache::ParsedSource {
-                    lines: source.lines().count(),
-                    imports: parser::imports(f, &source),
-                    source,
+                .unwrap_or_else(|| {
+                    let parsed = parser::parse(f, &source);
+                    cache::ParsedSource {
+                        lines: source.lines().count(),
+                        imports: parsed.imports,
+                        issues: parsed.issues,
+                        source,
+                    }
                 });
             Ok((f.clone(), parsed))
         })
@@ -91,12 +95,22 @@ pub fn analyze_with_cache(root: &Path, use_cache: bool) -> Result<AnalysisReport
     for f in &files {
         indexes.insert(f.clone(), graph.add_node(f.clone()));
     }
+    let mut diagnostics = Vec::new();
     let mut edges = Vec::new();
     let mut lines = HashMap::new();
     for (file, parsed) in parsed {
-        lines.insert(relative(root, &file), parsed.lines);
+        let config = configs.for_source(&file);
+        let filename = relative(root, &file);
+        diagnostics.extend(parsed.issues.iter().map(|issue| AnalysisDiagnostic {
+            file: filename.clone(),
+            code: "parse_error".into(),
+            message: issue.message.clone(),
+            line: Some(issue.line),
+            column: Some(issue.column),
+        }));
+        lines.insert(filename.clone(), parsed.lines);
         for spec in &parsed.imports {
-            if let Some(target) = resolve_import(root, &file, spec, &config, &workspaces) {
+            if let Some(target) = resolve_import(root, &file, spec, config, &workspaces) {
                 if let (Some(&from), Some(&to)) = (indexes.get(&file), indexes.get(&target)) {
                     graph.add_edge(from, to, ());
                     edges.push(DependencyEdge {
@@ -104,6 +118,16 @@ pub fn analyze_with_cache(root: &Path, use_cache: bool) -> Result<AnalysisReport
                         to: relative(root, &target),
                     });
                 }
+            } else if is_internal(spec, config, &workspaces) && !is_asset(spec) {
+                diagnostics.push(AnalysisDiagnostic {
+                    file: filename.clone(),
+                    code: "unresolved_import".into(),
+                    message: format!(
+                        "Cannot resolve '{spec}'; check the path, alias, or package entry point"
+                    ),
+                    line: None,
+                    column: None,
+                });
             }
         }
         cache.entries.insert(relative(root, &file), parsed);
@@ -131,18 +155,19 @@ pub fn analyze_with_cache(root: &Path, use_cache: bool) -> Result<AnalysisReport
         nodes,
         edges,
         lines,
+        diagnostics,
     })
 }
 fn relative(root: &Path, path: &Path) -> String {
     path.strip_prefix(root)
         .unwrap_or(path)
-        .display()
-        .to_string()
+        .to_string_lossy()
+        .replace('\\', "/")
 }
 fn is_source(path: &Path) -> bool {
     matches!(
         path.extension().and_then(|e| e.to_str()),
-        Some("ts" | "tsx" | "js" | "jsx" | "vue" | "mjs" | "cjs")
+        Some("ts" | "tsx" | "mts" | "cts" | "js" | "jsx" | "vue" | "mjs" | "cjs")
     )
 }
 fn resolve_import(
@@ -152,6 +177,7 @@ fn resolve_import(
     config: &ResolverConfig,
     workspaces: &Workspaces,
 ) -> Option<PathBuf> {
+    let spec = spec.split('?').next().unwrap_or(spec);
     if spec.starts_with('.') {
         return resolve_candidate(&source.parent()?.join(spec));
     }
@@ -166,11 +192,9 @@ fn resolve_import(
         score(b).cmp(&score(a)).then_with(|| a.cmp(b))
     });
     for (alias, targets) in aliases {
-        let wildcard = alias.strip_suffix('*');
-        let suffix = wildcard.and_then(|prefix| spec.strip_prefix(prefix));
-        if suffix.is_none() && alias != spec {
+        let Some(suffix) = alias_match(alias, spec) else {
             continue;
-        }
+        };
         for target in targets {
             let mapped = suffix.map_or_else(|| target.clone(), |s| target.replace('*', s));
             let base = config
@@ -189,14 +213,75 @@ fn resolve_import(
             return Some(found);
         }
     }
-    workspaces.resolve(spec).and_then(|p| resolve_candidate(&p))
+    workspaces
+        .candidates(spec)
+        .iter()
+        .find_map(|path| resolve_candidate(path))
+}
+fn alias_match<'a>(alias: &str, spec: &'a str) -> Option<Option<&'a str>> {
+    if let Some((prefix, suffix)) = alias.split_once('*') {
+        Some(Some(spec.strip_prefix(prefix)?.strip_suffix(suffix)?))
+    } else {
+        (alias == spec).then_some(None)
+    }
+}
+fn is_internal(spec: &str, config: &ResolverConfig, workspaces: &Workspaces) -> bool {
+    let spec = spec.split('?').next().unwrap_or(spec);
+    spec.starts_with('.')
+        || workspaces.contains(spec)
+        || config
+            .paths
+            .keys()
+            .any(|alias| alias_match(alias, spec).is_some())
+}
+fn is_asset(spec: &str) -> bool {
+    let path = spec.split('?').next().unwrap_or(spec);
+    matches!(
+        Path::new(path).extension().and_then(|s| s.to_str()),
+        Some(
+            "css"
+                | "scss"
+                | "sass"
+                | "less"
+                | "styl"
+                | "json"
+                | "svg"
+                | "png"
+                | "jpg"
+                | "jpeg"
+                | "webp"
+                | "gif"
+                | "ico"
+                | "woff"
+                | "woff2"
+                | "ttf"
+                | "mp4"
+                | "mp3"
+                | "wasm"
+                | "html"
+        )
+    )
 }
 fn resolve_candidate(base: &Path) -> Option<PathBuf> {
-    const EXTS: [&str; 7] = ["ts", "tsx", "js", "jsx", "vue", "mjs", "cjs"];
+    const EXTS: [&str; 9] = ["ts", "tsx", "mts", "cts", "js", "jsx", "vue", "mjs", "cjs"];
+    // Mirror TypeScript's runtime-extension substitutions, without mapping .mjs
+    // imports to CommonJS or vice versa.
+    let replacements: &[&str] = match base.extension().and_then(|e| e.to_str()) {
+        Some("js") => &["ts", "tsx", "js"],
+        Some("jsx") => &["tsx", "jsx"],
+        Some("mjs") => &["mts", "mjs"],
+        Some("cjs") => &["cts", "cjs"],
+        _ => &[],
+    };
+    for ext in replacements {
+        let candidate = base.with_extension(ext);
+        if candidate.is_file() {
+            return candidate.canonicalize().ok();
+        }
+    }
     if base.is_file() {
         return base.canonicalize().ok();
     }
-    // Preserve dotted module names when probing extensionless imports.
     for ext in EXTS {
         let mut name = base.as_os_str().to_os_string();
         name.push(format!(".{ext}"));
@@ -205,23 +290,11 @@ fn resolve_candidate(base: &Path) -> Option<PathBuf> {
             return candidate.canonicalize().ok();
         }
     }
-    // TypeScript projects may refer to the emitted JavaScript filename.
-    if matches!(
-        base.extension().and_then(|ext| ext.to_str()),
-        Some("js" | "jsx" | "mjs" | "cjs")
-    ) {
-        for ext in EXTS {
-            let candidate = base.with_extension(ext);
-            if candidate.is_file() {
-                return candidate.canonicalize().ok();
-            }
-        }
-    }
     if base.is_dir() {
         for ext in EXTS {
-            let c = base.join(format!("index.{ext}"));
-            if c.is_file() {
-                return c.canonicalize().ok();
+            let candidate = base.join(format!("index.{ext}"));
+            if candidate.is_file() {
+                return candidate.canonicalize().ok();
             }
         }
     }
@@ -262,7 +335,7 @@ mod tests {
         let emitted = dir.path().join("user.service.js");
         assert_eq!(resolve_candidate(&emitted), source.canonicalize().ok());
         fs::write(&emitted, "").unwrap();
-        assert_eq!(resolve_candidate(&emitted), emitted.canonicalize().ok());
+        assert_eq!(resolve_candidate(&emitted), source.canonicalize().ok());
     }
 
     #[test]

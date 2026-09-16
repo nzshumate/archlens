@@ -39,16 +39,29 @@ with tempfile.TemporaryDirectory(prefix='oxarch-http-') as directory:
         assert request('/missing')[0] == 404
         assert request('/api/report', 'POST')[0] == 405
         first = json.loads(request('/api/report')[2])
+        assert first['schema_version'] == 1
         assert first['analysis']['source_files'] == 1 and first['diff'] is None
+        assert first['analysis']['diagnostics'] == []
         (root / 'main.ts').write_text("import './new';")
         (root / 'new.ts').write_text('export {};')
         second = json.loads(request('/api/report')[2])
         assert second['analysis']['dependencies'] == 1
+        (root / 'oxarch.json').write_text(json.dumps({'entryPoints': ['main.ts']}))
+        (root / 'unused.ts').write_text('export {};')
+        (root / 'broken.ts').write_text('export const = ;')
+        diagnostic = json.loads(request('/api/report')[2])
+        assert diagnostic['metrics']['reachability_mode'] == 'explicit'
+        assert diagnostic['metrics']['dead_candidates'] == ['broken.ts', 'unused.ts']
+        assert diagnostic['analysis']['diagnostics'][0]['code'] == 'parse_error'
+        (root / '.oxarchignore').write_text('broken.ts\n')
+        recovered = json.loads(request('/api/report')[2])
+        assert recovered['analysis']['diagnostics'] == []
+        assert recovered['metrics']['dead_candidates'] == ['unused.ts']
         (root / 'oxarch.json').write_text('invalid rules')
         assert request('/api/report')[0] == 500
         (root / 'oxarch.json').write_text('{}')
         assert request('/api/report')[0] == 200
-        print('Explorer HTTP checks passed: assets, routing, refresh, error and recovery.')
+        print('Explorer HTTP checks passed: assets, routing, diagnostics, entry points, ignores, refresh, error and recovery.')
     finally:
         process.terminate()
         try:

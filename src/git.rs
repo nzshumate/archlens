@@ -1,4 +1,4 @@
-use crate::analyzer::{self, AnalysisReport, DependencyEdge};
+use crate::analyzer::{self, AnalysisDiagnostic, AnalysisReport, DependencyEdge};
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use std::{
@@ -10,7 +10,11 @@ use std::{
 
 #[derive(Debug, Serialize)]
 pub struct DiffReport {
+    pub schema_version: u32,
     pub base: String,
+    pub analysis_complete: bool,
+    pub base_diagnostics: Vec<AnalysisDiagnostic>,
+    pub current_diagnostics: Vec<AnalysisDiagnostic>,
     pub merge_base: String,
     pub changed_source_files: Vec<String>,
     pub deleted_source_files: Vec<String>,
@@ -116,7 +120,7 @@ pub fn diff(root: &Path, base: &str, report: &AnalysisReport) -> Result<DiffRepo
     let deleted_source_files = base_report
         .nodes
         .iter()
-        .filter(|n| !current_nodes.contains(n))
+        .filter(|n| !current_nodes.contains(n) && !root.join(n).exists())
         .cloned()
         .collect();
     let edge_set = |r: &AnalysisReport| {
@@ -175,6 +179,10 @@ pub fn diff(root: &Path, base: &str, report: &AnalysisReport) -> Result<DiffRepo
         .cloned()
         .collect();
     Ok(DiffReport {
+        schema_version: 1,
+        analysis_complete: report.diagnostics.is_empty() && base_report.diagnostics.is_empty(),
+        base_diagnostics: base_report.diagnostics.clone(),
+        current_diagnostics: report.diagnostics.clone(),
         base: base.into(),
         merge_base,
         changed_source_files,

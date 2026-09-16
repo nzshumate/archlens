@@ -4,11 +4,15 @@ use serde::{Deserialize, Serialize};
 use std::{fs, path::Path};
 
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RulesConfig {
     #[serde(default)]
     pub boundaries: Vec<BoundaryRule>,
+    #[serde(default, rename = "entryPoints")]
+    pub entry_points: Vec<String>,
 }
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct BoundaryRule {
     pub from: String,
     pub disallow: String,
@@ -31,8 +35,24 @@ pub fn load(root: &Path) -> Result<RulesConfig> {
         }
         Err(error) => return Err(error).with_context(|| format!("cannot read {}", path.display())),
     };
-    serde_json::from_str(&raw)
-        .with_context(|| format!("invalid architecture rules in {}", path.display()))
+    let config: RulesConfig = serde_json::from_str(&raw)
+        .with_context(|| format!("invalid architecture rules in {}", path.display()))?;
+    for entry in &config.entry_points {
+        anyhow::ensure!(
+            !entry.is_empty()
+                && !Path::new(entry).is_absolute()
+                && !entry.contains('\\')
+                && !entry.split('/').any(|part| part == ".."),
+            "entryPoints must be project-relative paths using forward slashes: {entry}"
+        );
+    }
+    for boundary in &config.boundaries {
+        anyhow::ensure!(
+            !boundary.from.is_empty() && !boundary.disallow.is_empty(),
+            "boundary from/disallow prefixes cannot be empty"
+        );
+    }
+    Ok(config)
 }
 
 pub fn evaluate(report: &AnalysisReport, config: &RulesConfig) -> Vec<Violation> {
@@ -75,6 +95,7 @@ mod tests {
                 to: "data/b.ts".into(),
             }],
             lines: HashMap::new(),
+            ..AnalysisReport::default()
         };
         let config = RulesConfig {
             boundaries: vec![BoundaryRule {
@@ -82,6 +103,7 @@ mod tests {
                 disallow: "data/".into(),
                 message: None,
             }],
+            ..RulesConfig::default()
         };
         assert_eq!(evaluate(&report, &config).len(), 1);
     }

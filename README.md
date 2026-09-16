@@ -8,8 +8,9 @@ Written in Rust. Runs locally. No Node.js runtime or cloud service required.
 
 ## Features
 
-- **Dependency analysis** — static imports, re-exports, literal dynamic imports, and CommonJS calls, with support for TypeScript aliases and common workspace layouts.
-- **Architecture checks** — dependency cycles, heavily connected modules, unused-module candidates, module size, and a health score.
+- **Dependency analysis** — static imports, re-exports, literal dynamic imports, and CommonJS calls, with per-package TypeScript aliases, workspace exports, and project ignore rules.
+- **Architecture checks** — dependency cycles, heavily connected modules, unreachable modules from configured entry points, module size, and a health score.
+- **Actionable diagnostics** — surface parse errors and unresolved internal imports; export machine-readable CI results.
 - **Boundary enforcement** — define allowed layers and fail CI when a dependency crosses a prohibited boundary.
 - **Git impact reports** — added and removed dependencies, new cycles, deleted modules, and transitively affected importers.
 - **Interactive explorer** — searchable dependency graphs, module details, branch overlays, and pan/zoom controls.
@@ -59,6 +60,7 @@ All commands accept a project path; it defaults to the current directory.
 | `oxarch analyze [path] --json` | Export the graph, metrics, and violations |
 | `oxarch analyze [path] --no-cache` | Analyze without reading or writing the parser cache |
 | `oxarch check [path] --min-health 80` | Enforce health, boundaries, and absence of cycles |
+| `oxarch check [path] --strict --json` | Export CI results and fail on unresolved internal imports |
 | `oxarch check [path] --allow-cycles` | Allow cycles while enforcing health and boundaries |
 | `oxarch diff <base> [path] --json` | Report architectural changes since the branch merge base |
 | `oxarch dev [path] --base main` | Explore dependencies with branch-impact overlays |
@@ -72,6 +74,7 @@ Create `oxarch.json` in the project being analyzed:
 
 ```json
 {
+  "entryPoints": ["src/main.ts"],
   "boundaries": [
     {
       "from": "src/ui/",
@@ -82,6 +85,8 @@ Create `oxarch.json` in the project being analyzed:
 }
 ```
 
+Set `entryPoints` to your actual application, worker, test, or library entry files. Oxarch follows their dependencies to find unreachable modules, including disconnected cycles. Without entry points, unused-module candidates use filename heuristics.
+
 Rules match path prefixes. Use a trailing `/` for directory boundaries. See [oxarch.example.json](oxarch.example.json) for a complete example.
 
 Run a local or CI check:
@@ -90,7 +95,7 @@ Run a local or CI check:
 oxarch check /path/to/frontend --min-health 80
 ```
 
-The command exits nonzero for boundary violations, cycles, or a health score below the threshold. The default threshold is **70**, with values from 0 to 100 accepted. `--allow-cycles` disables only the cycle check. Invalid rules and analysis errors also produce a nonzero exit status.
+The command exits nonzero for boundary violations, cycles, parse errors, an empty source graph, or a health score below the threshold. Add `--strict` to also reject unresolved internal imports. The default threshold is **70**, with values from 0 to 100 accepted. `--allow-cycles` disables only the cycle check. Invalid rules and analysis errors also produce a nonzero exit status.
 
 ## Review branch impact
 
@@ -105,12 +110,14 @@ In the explorer, added edges appear in green; removed edges and deleted modules 
 
 ## Supported scope
 
-Oxarch scans `.ts`, `.tsx`, `.js`, `.jsx`, `.vue`, `.mjs`, and `.cjs` files. It handles inline Vue scripts, relative and index imports, TypeScript aliases, JSONC configs with relative extensions, and common workspace packages.
+Oxarch scans `.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.vue`, `.mjs`, and `.cjs` files. It supports inline and external Vue scripts, TypeScript runtime-extension substitution, nearest-package `tsconfig.json`/`jsconfig.json` aliases, relative config extensions, and workspace package entry points and exports.
 
-- Dead-module detection uses entry-point heuristics. The health score and line-based size metrics are signals for review.
-- Resolution does not reproduce every Node.js or TypeScript mode. Package `exports` conditions, project references, package-based tsconfig extensions, and `.mts`/`.cts` sources are not supported.
-- Dynamic expressions and external Vue script sources are not resolved. Parse recovery is best effort; use your compiler for syntax and type validation.
-- Common generated/vendor directories are skipped; other `.gitignore` patterns are not applied.
+Project-local `.gitignore` and `.oxarchignore` files control discovery. Use `.oxarchignore` for analysis-only exclusions such as generated fixtures. Common generated/vendor directories are always skipped.
+
+- Reachability follows statically discoverable imports. Include framework routes and other implicit entry points in `entryPoints`; review candidates before deleting code.
+- Workspace exports use a documented static condition preference. Full Node.js/TypeScript resolution, project references, and package-based tsconfig extensions remain outside the supported scope.
+- Dynamic expressions and full Vue compiler semantics are not supported. Parse errors are reported, but Oxarch does not replace syntax and type checking by your compiler.
+- Diagnostics mean the graph and health score may be incomplete. The score and line-based size metrics are review signals.
 - The explorer binds to `127.0.0.1` and is intended for local use. Refresh is manual.
 
 The parser cache lives in `target/oxarch` inside the analyzed project and contains source text. Keep it out of version control. Use `--no-cache` to bypass it or remove that directory to reset it.

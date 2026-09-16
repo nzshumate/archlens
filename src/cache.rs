@@ -2,12 +2,13 @@
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fs, io::Write, path::Path};
 
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 #[derive(Clone, Deserialize, Serialize)]
 pub struct ParsedSource {
     pub source: String,
     pub imports: Vec<String>,
     pub lines: usize,
+    pub issues: Vec<crate::parser::ParseIssue>,
 }
 #[derive(Deserialize, Serialize)]
 pub struct Cache {
@@ -24,7 +25,7 @@ impl Default for Cache {
 }
 impl Cache {
     pub fn load(root: &Path) -> Self {
-        fs::read(root.join("target/oxarch/parsed-v1.json"))
+        fs::read(root.join("target/oxarch/parsed-v2.json"))
             .ok()
             .and_then(|raw| serde_json::from_slice::<Self>(&raw).ok())
             .filter(|cache| cache.version == VERSION)
@@ -38,7 +39,7 @@ impl Cache {
             fs::create_dir_all(&dir)?;
             let mut temp = tempfile::NamedTempFile::new_in(&dir)?;
             temp.write_all(&serde_json::to_vec(self)?)?;
-            temp.persist(dir.join("parsed-v1.json"))?;
+            temp.persist(dir.join("parsed-v2.json"))?;
             Ok(())
         };
         let _ = write();

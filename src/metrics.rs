@@ -1,4 +1,5 @@
-use crate::analyzer::AnalysisReport;
+use crate::{analyzer::AnalysisReport, rules::RulesConfig};
+use anyhow::{ensure, Result};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 
@@ -9,6 +10,8 @@ pub struct ArchitectureMetrics {
     pub hubs: Vec<ModuleMetric>,
     pub large_modules: Vec<ModuleComplexity>,
     pub health_score: u8,
+    pub entry_points: Vec<String>,
+    pub reachability_mode: String,
 }
 #[derive(Debug, Serialize)]
 pub struct ModuleMetric {
@@ -22,7 +25,7 @@ pub struct ModuleComplexity {
     pub lines: usize,
 }
 
-pub fn calculate(report: &AnalysisReport) -> ArchitectureMetrics {
+pub fn calculate(report: &AnalysisReport, config: &RulesConfig) -> Result<ArchitectureMetrics> {
     let mut incoming: HashMap<&str, usize> = HashMap::new();
     let mut outgoing: HashMap<&str, usize> = HashMap::new();
     for edge in &report.edges {
@@ -38,14 +41,48 @@ pub fn calculate(report: &AnalysisReport) -> ArchitectureMetrics {
         })
         .cloned()
         .collect::<Vec<_>>();
-    let dead_candidates = report
-        .nodes
+    let mut entry_points = config
+        .entry_points
         .iter()
-        .filter(|node| {
-            incoming.get(node.as_str()).copied().unwrap_or(0) == 0 && !is_entrypoint(node)
-        })
-        .cloned()
+        .map(|path| path.trim_start_matches("./").to_owned())
         .collect::<Vec<_>>();
+    entry_points.sort();
+    entry_points.dedup();
+    for entry in &entry_points {
+        ensure!(
+            report.nodes.contains(entry),
+            "entry point '{entry}' is missing, ignored, or not a supported source file"
+        );
+    }
+    let explicit = !entry_points.is_empty();
+    let dead_candidates = if explicit {
+        let mut adjacency: HashMap<&str, Vec<&str>> = HashMap::new();
+        for edge in &report.edges {
+            adjacency.entry(&edge.from).or_default().push(&edge.to);
+        }
+        let mut pending = entry_points.iter().map(String::as_str).collect::<Vec<_>>();
+        let mut reached = HashSet::new();
+        while let Some(node) = pending.pop() {
+            if reached.insert(node) {
+                pending.extend(adjacency.get(node).into_iter().flatten().copied());
+            }
+        }
+        report
+            .nodes
+            .iter()
+            .filter(|node| !reached.contains(node.as_str()))
+            .cloned()
+            .collect::<Vec<_>>()
+    } else {
+        report
+            .nodes
+            .iter()
+            .filter(|node| {
+                incoming.get(node.as_str()).copied().unwrap_or(0) == 0 && !is_entrypoint(node)
+            })
+            .cloned()
+            .collect::<Vec<_>>()
+    };
     let mut hubs = report
         .nodes
         .iter()
@@ -71,13 +108,15 @@ pub fn calculate(report: &AnalysisReport) -> ArchitectureMetrics {
     let penalty =
         (cycle_nodes * 5).min(45) + dead_candidates.len().min(20) + large_modules.len().min(15);
     let health_score = 100usize.saturating_sub(penalty) as u8;
-    ArchitectureMetrics {
+    Ok(ArchitectureMetrics {
         orphan_modules,
         dead_candidates,
         hubs,
         large_modules,
         health_score,
-    }
+        entry_points,
+        reachability_mode: if explicit { "explicit" } else { "heuristic" }.into(),
+    })
 }
 
 fn is_entrypoint(path: &str) -> bool {
@@ -112,8 +151,9 @@ mod tests {
             nodes,
             edges,
             lines: HashMap::new(),
+            ..AnalysisReport::default()
         };
-        let metrics = calculate(&report);
+        let metrics = calculate(&report, &RulesConfig::default()).unwrap();
         assert_eq!(metrics.orphan_modules, vec!["orphan.ts"]);
         assert_eq!(metrics.hubs[0].module, "hub.ts");
         assert_eq!(metrics.hubs[0].fan_in, 5);

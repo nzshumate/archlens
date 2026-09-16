@@ -10,11 +10,12 @@ const HTML: &str = include_str!("explorer.html");
 const JS: &str = include_str!("explorer.js");
 fn report(root: &Path, base: Option<&str>) -> Result<String> {
     let analysis = analyzer::analyze(root)?;
-    let metrics = metrics::calculate(&analysis);
-    let violations = rules::evaluate(&analysis, &rules::load(root)?);
+    let config = rules::load(root)?;
+    let metrics = metrics::calculate(&analysis, &config)?;
+    let violations = rules::evaluate(&analysis, &config);
     let diff = base.map(|b| git::diff(root, b, &analysis)).transpose()?;
     Ok(serde_json::to_string(
-        &serde_json::json!({"analysis":analysis,"metrics":metrics,"violations":violations,"diff":diff}),
+        &serde_json::json!({"schema_version":1,"analysis":analysis,"metrics":metrics,"violations":violations,"diff":diff}),
     )?)
 }
 fn respond(mut stream: TcpStream, root: &Path, base: Option<&str>) -> Result<()> {

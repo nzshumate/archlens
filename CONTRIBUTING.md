@@ -15,7 +15,7 @@ python3 scripts/smoke-explorer.py
 
 The HTTP smoke test starts a temporary loopback server and stops it when finished. GitHub Actions runs the checks on Linux and macOS and compares cached and uncached reports on a generated source corpus.
 
-Add regression coverage when changing parsing, import resolution, caching, rules, or Git comparisons. Explorer changes should also be checked in a browser, including filtering, node selection, refresh, and error states. Changes to cached parsing semantics require a cache format/version update.
+Add regression coverage when changing parsing, import resolution, caching, rules, diagnostics, ignore discovery, reachability, or Git comparisons. Explorer changes should also be checked in a browser, including filtering, node selection, diagnostics, refresh recovery, and error states. Changes to cached parsing semantics require a cache format/version update.
 
 ## Reproducible benchmarks
 
