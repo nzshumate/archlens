@@ -1,26 +1,5 @@
-use crate::analyzer::AnalysisReport;
-use anyhow::{bail, Context, Result};
-use serde::Serialize;
-use std::{collections::HashSet, path::Path, process::Command};
-
-#[derive(Debug, Serialize)]
-pub struct DiffReport {
-    pub base: String,
-    pub changed_source_files: Vec<String>,
-    pub affected_dependencies: usize,
-    pub cycles_in_current_tree: usize,
-}
-
-pub fn diff(root: &Path, base: &str, report: &AnalysisReport) -> Result<DiffReport> {
-    let range = format!("{base}...HEAD");
-    let output = Command::new("git").arg("diff").arg("--name-only").arg(&range).current_dir(root).output().context("failed to run git diff")?;
-    if !output.status.success() {
-        bail!("git diff failed for base '{base}': {}", String::from_utf8_lossy(&output.stderr));
-    }
-    let known = report.nodes.iter().map(String::as_str).collect::<HashSet<_>>();
-    let mut changed_source_files = String::from_utf8_lossy(&output.stdout).lines().filter(|path| known.contains(*path)).map(str::to_owned).collect::<Vec<_>>();
-    changed_source_files.sort();
-    let changed = changed_source_files.iter().map(String::as_str).collect::<HashSet<_>>();
-    let affected_dependencies = report.edges.iter().filter(|edge| changed.contains(edge.from.as_str()) || changed.contains(edge.to.as_str())).count();
-    Ok(DiffReport { base: base.into(), changed_source_files, affected_dependencies, cycles_in_current_tree: report.cycles.len() })
-}
+use crate::analyzer::{self,AnalysisReport};use anyhow::{bail,Context,Result};use serde::Serialize;use std::{collections::HashSet,fs,path::Path,process::Command,time::{SystemTime,UNIX_EPOCH}};
+#[derive(Debug,Serialize)]pub struct DiffReport{pub base:String,pub changed_source_files:Vec<String>,pub affected_dependencies:usize,pub added_dependencies:Vec<String>,pub removed_dependencies:Vec<String>,pub new_cycles:Vec<Vec<String>>,pub cycles_in_current_tree:usize}
+pub fn diff(root:&Path,base:&str,report:&AnalysisReport)->Result<DiffReport>{let range=format!("{base}...HEAD");let output=Command::new("git").arg("diff").arg("--name-only").arg(&range).current_dir(root).output().context("failed to run git diff")?;if !output.status.success(){bail!("git diff failed for base '{base}': {}",String::from_utf8_lossy(&output.stderr));}let known=report.nodes.iter().map(String::as_str).collect::<HashSet<_>>();let mut changed_source_files=String::from_utf8_lossy(&output.stdout).lines().filter(|p|known.contains(*p)).map(str::to_owned).collect::<Vec<_>>();changed_source_files.sort();let changed=changed_source_files.iter().map(String::as_str).collect::<HashSet<_>>();let affected_dependencies=report.edges.iter().filter(|e|changed.contains(e.from.as_str())||changed.contains(e.to.as_str())).count();
+let base_report=analyze_base(root,base)?;let current_edges=report.edges.iter().map(|e|format!("{} -> {}",e.from,e.to)).collect::<HashSet<_>>();let base_edges=base_report.edges.iter().map(|e|format!("{} -> {}",e.from,e.to)).collect::<HashSet<_>>();let mut added_dependencies=current_edges.difference(&base_edges).cloned().collect::<Vec<_>>();let mut removed_dependencies=base_edges.difference(&current_edges).cloned().collect::<Vec<_>>();added_dependencies.sort();removed_dependencies.sort();let base_cycles=base_report.cycles.iter().map(|c|{let mut x=c.clone();x.sort();x.join("|")}).collect::<HashSet<_>>();let new_cycles=report.cycles.iter().filter(|c|{let mut x=(*c).clone();x.sort();!base_cycles.contains(&x.join("|"))}).cloned().collect();Ok(DiffReport{base:base.into(),changed_source_files,affected_dependencies,added_dependencies,removed_dependencies,new_cycles,cycles_in_current_tree:report.cycles.len()})}
+fn analyze_base(root:&Path,base:&str)->Result<AnalysisReport>{let stamp=SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();let temp=std::env::temp_dir().join(format!("archlens-{}-{stamp}",std::process::id()));let status=Command::new("git").args(["worktree","add","--detach"]).arg(&temp).arg(base).current_dir(root).status().context("failed to create temporary git worktree")?;if !status.success(){bail!("could not create worktree for '{base}'");}let result=analyzer::analyze(&temp);let _=Command::new("git").args(["worktree","remove","--force"]).arg(&temp).current_dir(root).status();let _=fs::remove_dir_all(&temp);result}
