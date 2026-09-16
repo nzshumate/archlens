@@ -586,3 +586,206 @@ fn diff_preserves_analysis_diagnostics_in_both_snapshots() {
     assert_eq!(result["base_diagnostics"].as_array().unwrap().len(), 1);
     assert_eq!(result["current_diagnostics"].as_array().unwrap().len(), 1);
 }
+
+#[test]
+fn package_configs_resolve_hoisted_scoped_defaults_and_multiple_bases() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    write(
+        root,
+        "node_modules/expo/tsconfig.base.json",
+        r#"{"compilerOptions":{"paths":{"@base/*":["../../shared/*"]}}}"#,
+    );
+    write(
+        root,
+        "node_modules/@team/config/package.json",
+        r#"{"tsconfig":"./base.json"}"#,
+    );
+    write(
+        root,
+        "node_modules/@team/config/base.json",
+        r#"{"compilerOptions":{"baseUrl":"../../../shared"}}"#,
+    );
+    write(
+        root,
+        "node_modules/default-config/tsconfig.json",
+        r#"{"compilerOptions":{"paths":{"@default":["../../shared/value"]}}}"#,
+    );
+    write(
+        root,
+        "mobile/tsconfig.json",
+        r#"{"extends":["expo/tsconfig.base","@team/config"],"compilerOptions":{"paths":{"@local":["value"]}}}"#,
+    );
+    write(root, "mobile/main.ts", "import '@local';");
+    write(
+        root,
+        "other/tsconfig.json",
+        r#"{"extends":"default-config"}"#,
+    );
+    write(root, "other/main.ts", "import '@default';");
+    write(root, "shared/value.ts", "export {};");
+    let result = analyze(root, false);
+    assert_eq!(result["analysis"]["dependencies"], 2);
+    assert_eq!(result["analysis"]["diagnostics"], serde_json::json!([]));
+    assert_eq!(result["analysis"]["source_files"], 3);
+}
+
+#[test]
+fn missing_package_config_is_visible_and_fails_checks_until_installed() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    write(
+        root,
+        "tsconfig.json",
+        r#"{"extends":"expo/tsconfig.base","compilerOptions":{"paths":{"@local":["./local"]}}}"#,
+    );
+    write(root, "main.ts", "import '@local';");
+    write(root, "local.ts", "export {};");
+    let report = analyze(root, false);
+    assert_eq!(report["analysis"]["dependencies"], 1);
+    assert_eq!(
+        report["analysis"]["diagnostics"][0]["code"],
+        "unresolved_config"
+    );
+    let (passed, result) = check_json(root, false);
+    assert!(!passed);
+    assert!(result["check"]["failures"]
+        .as_array()
+        .unwrap()
+        .contains(&serde_json::json!("configuration")));
+    write(root, "node_modules/expo/tsconfig.base.json", "{}");
+    assert_eq!(
+        analyze(root, false)["analysis"]["diagnostics"],
+        serde_json::json!([])
+    );
+    assert!(check_json(root, false).0);
+    write(
+        root,
+        "node_modules/expo/tsconfig.base.json",
+        r#"{"extends":"../../tsconfig.json"}"#,
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_oxarch"))
+        .args(["analyze", root.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("circular TypeScript configuration"));
+}
+
+#[test]
+fn next_conventions_seed_reachability_without_hiding_colocated_or_private_modules() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    write(
+        root,
+        "package.json",
+        r#"{"name":"web","dependencies":{"next":"16"}}"#,
+    );
+    write(
+        root,
+        "src/app/(group)/page.tsx",
+        "import '../../components/button';",
+    );
+    write(root, "src/components/button.tsx", "export {};");
+    for file in [
+        "src/app/api/data/route.ts",
+        "src/app/@modal/default.tsx",
+        "src/app/global-error.tsx",
+        "src/app/sitemap.ts",
+        "src/pages/legacy.tsx",
+        "src/proxy.ts",
+        "next.config.mjs",
+        "src/app/helper.ts",
+        "src/app/_private/page.tsx",
+        "src/types.d.ts",
+    ] {
+        write(root, file, "export {};");
+    }
+    let result = analyze(root, false);
+    assert_eq!(result["metrics"]["reachability_mode"], "framework");
+    assert_eq!(
+        result["metrics"]["entry_points"].as_array().unwrap().len(),
+        8
+    );
+    assert_eq!(
+        result["metrics"]["dead_candidates"],
+        serde_json::json!(["src/app/_private/page.tsx", "src/app/helper.ts"])
+    );
+    write(
+        root,
+        "oxarch.json",
+        r#"{"entryPoints":["src/components/button.tsx"]}"#,
+    );
+    let explicit = analyze(root, false);
+    assert_eq!(explicit["metrics"]["reachability_mode"], "explicit");
+    assert_eq!(
+        explicit["metrics"]["entry_points"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn next_generated_type_exception_is_narrow_and_framework_specific() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    write(root, "package.json", r#"{"dependencies":{"next":"16"}}"#);
+    write(root, "next-env.d.ts", "import './.next/types/routes.d.ts'; import './.next/dev/types/root-params.d.ts'; import './missing';");
+    write(
+        root,
+        "app/page.tsx",
+        "import '../.next/types/real-missing.d.ts';",
+    );
+    let result = analyze(root, false);
+    assert_eq!(
+        result["analysis"]["diagnostics"].as_array().unwrap().len(),
+        2
+    );
+    write(root, "package.json", "{}");
+    let plain = analyze(root, false);
+    assert_eq!(
+        plain["analysis"]["diagnostics"].as_array().unwrap().len(),
+        4
+    );
+    assert_eq!(plain["metrics"]["reachability_mode"], "heuristic");
+}
+
+#[test]
+fn framework_detection_respects_package_boundaries_and_expo_main() {
+    let dir = tempdir().unwrap();
+    let root = dir.path();
+    write(root, "package.json", r#"{"dependencies":{"next":"16"}}"#);
+    write(root, "app/page.tsx", "export {};");
+    write(root, "packages/plain/package.json", r#"{"name":"plain"}"#);
+    write(root, "packages/plain/app/page.tsx", "export {};");
+    write(
+        root,
+        "mobile/package.json",
+        r#"{"name":"mobile","dependencies":{"expo":"57"},"main":"./index.ts"}"#,
+    );
+    write(root, "mobile/index.ts", "import './App';");
+    write(root, "mobile/App.tsx", "export {};");
+    write(
+        root,
+        "router/package.json",
+        r#"{"name":"router","dependencies":{"expo":"57","expo-router":"1"},"main":"expo-router/entry"}"#,
+    );
+    write(root, "router/app/_layout.tsx", "export {};");
+    write(root, "router/app/profile.tsx", "export {};");
+    let result = analyze(root, false);
+    assert_eq!(
+        result["metrics"]["entry_points"],
+        serde_json::json!([
+            "app/page.tsx",
+            "mobile/index.ts",
+            "router/app/_layout.tsx",
+            "router/app/profile.tsx"
+        ])
+    );
+    assert_eq!(
+        result["metrics"]["dead_candidates"],
+        serde_json::json!(["packages/plain/app/page.tsx"])
+    );
+}

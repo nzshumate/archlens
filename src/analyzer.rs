@@ -1,7 +1,9 @@
 use crate::{
     cache,
     config::{Configs, ResolverConfig},
-    discovery, parser,
+    discovery,
+    framework::Frameworks,
+    parser,
     workspace::Workspaces,
 };
 use anyhow::{Context, Result};
@@ -23,6 +25,7 @@ pub struct AnalysisReport {
     pub edges: Vec<DependencyEdge>,
     pub lines: HashMap<String, usize>,
     pub diagnostics: Vec<AnalysisDiagnostic>,
+    pub framework_entry_points: Vec<String>,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AnalysisDiagnostic {
@@ -54,6 +57,7 @@ pub fn analyze_with_cache(root: &Path, use_cache: bool) -> Result<AnalysisReport
     let all_files = discovery::files(root)?;
     let configs = Configs::load(root, &all_files)?;
     let workspaces = Workspaces::discover(&all_files)?;
+    let frameworks = Frameworks::discover(&all_files)?;
     let files_scanned = all_files.len();
     let files = all_files
         .into_iter()
@@ -95,7 +99,19 @@ pub fn analyze_with_cache(root: &Path, use_cache: bool) -> Result<AnalysisReport
     for f in &files {
         indexes.insert(f.clone(), graph.add_node(f.clone()));
     }
-    let mut diagnostics = Vec::new();
+    let mut diagnostics = configs
+        .issues
+        .iter()
+        .map(|issue| AnalysisDiagnostic {
+            file: relative(root, &issue.file),
+            code: "unresolved_config".into(),
+            message: issue.message.clone(),
+            line: None,
+            column: None,
+        })
+        .collect::<Vec<_>>();
+    diagnostics.sort_by(|a, b| (&a.file, &a.message).cmp(&(&b.file, &b.message)));
+    diagnostics.dedup_by(|a, b| a.file == b.file && a.message == b.message);
     let mut edges = Vec::new();
     let mut lines = HashMap::new();
     for (file, parsed) in parsed {
@@ -118,7 +134,10 @@ pub fn analyze_with_cache(root: &Path, use_cache: bool) -> Result<AnalysisReport
                         to: relative(root, &target),
                     });
                 }
-            } else if is_internal(spec, config, &workspaces) && !is_asset(spec) {
+            } else if is_internal(spec, config, &workspaces)
+                && !is_asset(spec)
+                && !frameworks.generated_type_import(&file, spec)
+            {
                 diagnostics.push(AnalysisDiagnostic {
                     file: filename.clone(),
                     code: "unresolved_import".into(),
@@ -156,6 +175,11 @@ pub fn analyze_with_cache(root: &Path, use_cache: bool) -> Result<AnalysisReport
         edges,
         lines,
         diagnostics,
+        framework_entry_points: files
+            .iter()
+            .filter(|file| frameworks.entrypoint(file))
+            .map(|file| relative(root, file))
+            .collect(),
     })
 }
 fn relative(root: &Path, path: &Path) -> String {

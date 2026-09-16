@@ -1,4 +1,4 @@
-use crate::{analyzer::AnalysisReport, rules::RulesConfig};
+use crate::{analyzer::AnalysisReport, framework::is_declaration, rules::RulesConfig};
 use anyhow::{ensure, Result};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -55,7 +55,11 @@ pub fn calculate(report: &AnalysisReport, config: &RulesConfig) -> Result<Archit
         );
     }
     let explicit = !entry_points.is_empty();
-    let dead_candidates = if explicit {
+    if !explicit {
+        entry_points = report.framework_entry_points.clone();
+    }
+    let rooted = !entry_points.is_empty();
+    let dead_candidates = if rooted {
         let mut adjacency: HashMap<&str, Vec<&str>> = HashMap::new();
         for edge in &report.edges {
             adjacency.entry(&edge.from).or_default().push(&edge.to);
@@ -70,7 +74,7 @@ pub fn calculate(report: &AnalysisReport, config: &RulesConfig) -> Result<Archit
         report
             .nodes
             .iter()
-            .filter(|node| !reached.contains(node.as_str()))
+            .filter(|node| !is_declaration(node) && !reached.contains(node.as_str()))
             .cloned()
             .collect::<Vec<_>>()
     } else {
@@ -78,7 +82,9 @@ pub fn calculate(report: &AnalysisReport, config: &RulesConfig) -> Result<Archit
             .nodes
             .iter()
             .filter(|node| {
-                incoming.get(node.as_str()).copied().unwrap_or(0) == 0 && !is_entrypoint(node)
+                incoming.get(node.as_str()).copied().unwrap_or(0) == 0
+                    && !is_entrypoint(node)
+                    && !is_declaration(node)
             })
             .cloned()
             .collect::<Vec<_>>()
@@ -115,7 +121,14 @@ pub fn calculate(report: &AnalysisReport, config: &RulesConfig) -> Result<Archit
         large_modules,
         health_score,
         entry_points,
-        reachability_mode: if explicit { "explicit" } else { "heuristic" }.into(),
+        reachability_mode: if explicit {
+            "explicit"
+        } else if rooted {
+            "framework"
+        } else {
+            "heuristic"
+        }
+        .into(),
     })
 }
 

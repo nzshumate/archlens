@@ -20,7 +20,7 @@ The health score subtracts penalties for modules in cycles, dead-module candidat
 
 ## Resolution
 
-Each source uses the nearest discovered `tsconfig.json` or `jsconfig.json` up to the analysis root; TypeScript config takes precedence when both exist. JSONC comments and trailing commas are supported. Relative `extends` chains preserve configuration origins and reject missing files, cycles, or chains longer than 32 levels. Package-based extensions and project references are not resolved.
+Each source uses the nearest discovered `tsconfig.json` or `jsconfig.json` up to the analysis root; TypeScript config takes precedence when both exist. JSONC comments and trailing commas are supported. Relative `extends` chains preserve configuration origins and reject missing files, cycles, or chains longer than 32 levels. Package extensions resolve through ancestor `node_modules` directories, including scoped names, explicit subpaths (with optional `.json`), a package’s `tsconfig` field, and default `tsconfig.json`. Multiple `extends` entries are applied left to right, with later settings overriding earlier ones. No packages are downloaded or executed. Missing shared package configs produce `unresolved_config` diagnostics while local settings are still used; `check` fails even without `--strict`. Missing relative files, malformed configs, and extension cycles remain fatal. Project references, package exports maps for config lookup, and Yarn Plug’n’Play are not resolved.
 
 `baseUrl` and `paths` support exact aliases and one wildcard, including suffix patterns. Relative imports support index files and dotted names. Runtime extension substitution maps `.js` to `.ts`/`.tsx`, `.jsx` to `.tsx`, `.mjs` to `.mts`, and `.cjs` to `.cts` before considering the corresponding JavaScript file. Query suffixes are stripped for resolution.
 
@@ -36,11 +36,17 @@ Set `entryPoints` in `oxarch.json` to explicit root-relative source paths, for e
 {"entryPoints": ["src/main.ts", "src/worker.ts"], "boundaries": []}
 ```
 
-Every entry must exist in the scanned graph. Reachability follows outgoing imports from all entries and reports unreachable modules in `metrics.dead_candidates`, including isolated cycles. Without entries, candidates use the existing zero-incoming-edge and main/index/app filename heuristic. `metrics.reachability_mode` identifies `explicit` or `heuristic` analysis. Reachability is module-level, not unused-export detection; type-only imports count as dependencies. Framework routing, test discovery, and runtime loading can make apparently unreachable code useful.
+Every entry must exist in the scanned graph. Reachability follows outgoing imports from all entries and reports unreachable modules in `metrics.dead_candidates`, including isolated cycles. Explicit entries override automatic detection. Otherwise, Next.js and Expo conventions supply roots when available; remaining projects use the zero-incoming-edge and main/index/app filename heuristic. `metrics.reachability_mode` identifies `explicit`, `framework`, or `heuristic` analysis. Declaration files (`.d.ts`, `.d.mts`, `.d.cts`) stay in the graph but are excluded from unused-module candidates. Reachability is module-level, not unused-export detection; type-only imports count as dependencies. Custom framework routing, test discovery, scripts, and runtime loading can make apparently unreachable code useful.
+
+Framework detection requires `next` or `expo` in a discovered package's dependencies, devDependencies, or peerDependencies. Each source belongs to its nearest package, so conventions do not leak into unrelated nested packages. `analysis.framework_entry_points` exposes the detected roots even when explicit roots override them.
+
+- Next.js: standard `app`/`src/app` special files (pages, layouts, handlers, error/loading boundaries, metadata routes), Pages Router files, middleware/proxy/instrumentation files, and `next.config.js`/`.mjs`/`.ts`. App Router private folders beginning with `_` are excluded. Custom `pageExtensions` and executable config overrides are not interpreted.
+- Expo: the exact local `main` source path, or conventional index/App files when no main is declared. With `expo-router/entry` and an `expo-router` dependency, files under `app`/`src/app` are route roots.
+- Only in a detected Next.js package's root `next-env.d.ts`, missing `./.next/types/*.d.ts` and `./.next/dev/types/*.d.ts` imports are treated as expected generated references. Missing imports elsewhere still produce diagnostics. Build output remains excluded from the graph.
 
 `analysis.diagnostics` includes `parse_error` findings with one-based line/column locations and `unresolved_import` findings for missing relative, configured-alias, or known internal-package imports. External package names, missing bare `baseUrl` imports, and common asset imports are not diagnosed. Already resolved but excluded files are omitted from the graph without a diagnostic. Syntax recovery may leave a partial graph; metrics must be interpreted with the diagnostics.
 
-`oxarch check --strict --json` emits a versioned report containing `analysis`, `metrics`, `violations`, and `check`. The check includes `passed`, `failures`, and the selected thresholds/options. Failure codes are `cycles`, `health`, `boundaries`, `parse_errors`, `unresolved_imports` (strict mode), and `no_source_files`. A failed check still emits JSON and exits with status 1. Fatal configuration and I/O errors instead go to stderr and exit nonzero. `--allow-cycles` disables only the cycle check; `--min-health` still applies.
+`oxarch check --strict --json` emits a versioned report containing `analysis`, `metrics`, `violations`, and `check`. The check includes `passed`, `failures`, and the selected thresholds/options. Failure codes are `configuration` (unresolved shared config), `cycles`, `health`, `boundaries`, `parse_errors`, `unresolved_imports` (strict mode), and `no_source_files`. A failed check still emits JSON and exits with status 1. Fatal configuration and I/O errors instead go to stderr and exit nonzero. `--allow-cycles` disables only the cycle check; `--min-health` still applies.
 
 Analyze, check, explorer, and diff JSON have `schema_version: 1`. Consumers should tolerate additional fields. Diff includes diagnostics from both snapshots and `analysis_complete`, so a partial base graph is visible too.
 
@@ -97,11 +103,11 @@ The explorer analyzes on demand, not automatically on filesystem changes. Filena
 
 ## Current limitations
 
-- Reachability only follows statically discovered imports. Framework routes and runtime entry points need explicit configuration; there is no unused-export analysis.
+- Reachability only follows statically discovered imports. Custom framework routes and runtime entry points need explicit configuration; there is no unused-export analysis.
 - Module size is measured in lines, not cyclomatic complexity. The health score is an opinionated review signal.
 - Dynamic runtime expressions cannot be resolved. Bare `require` calls are detected syntactically, without checking whether that identifier is locally shadowed.
 - Vue extraction is not a full single-file-component compiler. Template references, preprocessor semantics, and framework-generated dependencies are not analyzed.
-- TypeScript/workspace resolution handles the documented static subset, not every Node/TypeScript resolution mode. Project references, package-based tsconfig extensions, custom export-condition sets, and bundler plugins are not implemented.
+- TypeScript/workspace resolution handles the documented static subset, not every Node/TypeScript resolution mode. Project references, Plug’n’Play, config-package exports maps, custom export-condition sets, and bundler plugins are not implemented.
 - Parse diagnostics and recovery do not replace a compiler/type checker. Missing external dependencies and assets are outside this source-graph check.
 - The explorer is a local, single-request-at-a-time development server, not a public hosting service. Refresh is manual.
 - The graph is paginated for usability; very large graphs may require focused filtering.

@@ -43,7 +43,7 @@ function render() {
   const findings = [...a.diagnostics.map(diagnostic => ({...diagnostic, tree: 'Current'})), ...(d?.base_diagnostics || []).map(diagnostic => ({...diagnostic, tree: 'Base'}))];
   $('diagnostic-panel').hidden = !findings.length;
   for (const finding of findings) element('li', `${finding.tree}: ${finding.file}${finding.line ? `:${finding.line}:${finding.column}` : ''} [${finding.code}] ${finding.message}`, $('diagnostics'));
-  $('reachability').textContent = m.reachability_mode === 'explicit' ? `Reachability from: ${m.entry_points.join(', ')} · ${m.dead_candidates.length} unreachable candidates` : 'Unused-module candidates use filename heuristics. Set entryPoints in oxarch.json for graph reachability.';
+  $('reachability').textContent = m.reachability_mode !== 'heuristic' ? `Reachability (${m.reachability_mode}) from: ${m.entry_points.join(', ')} · ${m.dead_candidates.length} unreachable candidates` : 'Unused-module candidates use filename heuristics. Set entryPoints in oxarch.json for graph reachability.';
   $('cards').replaceChildren();
   for (const [label, value] of [[a.diagnostics.length ? 'Health (incomplete analysis)' : 'Health', `${m.health_score}/100`], ['Modules', a.source_files], ['Dependencies', a.dependencies], ['Cycles', a.cycles.length], ['Boundary violations', data.violations.length]]) card($('cards'), label, value);
   $('impact').replaceChildren();
@@ -79,8 +79,8 @@ function render() {
   if (!selected) { element('h2', 'Module details', $('details')); element('p', 'Select a graph node or a module below.', $('details')); }
   if (selected) {
     element('h2', selected, $('details'));
-    if (m.entry_points.includes(selected)) element('p', 'Configured entry point', $('details'));
-    if (unused.has(selected)) element('p', m.reachability_mode === 'explicit' ? 'Unreachable from configured entry points' : 'Unused candidate (heuristic)', $('details'));
+    if (m.entry_points.includes(selected)) element('p', m.reachability_mode === 'framework' ? 'Detected framework entry point' : 'Configured entry point', $('details'));
+    if (unused.has(selected)) element('p', m.reachability_mode !== 'heuristic' ? 'Unreachable from analysis entry points' : 'Unused candidate (heuristic)', $('details'));
     element('p', deleted.has(selected) ? 'Deleted from the current tree' : `${a.lines[selected] || 0} ${(a.lines[selected] || 0) === 1 ? 'line' : 'lines'}`, $('details'));
     for (const [label, names] of [['Imports', a.edges.filter(e => e.from === selected).map(e => e.to)], ['Imported by', a.edges.filter(e => e.to === selected).map(e => e.from)], ['Removed connections', (d?.removed_edges || []).filter(e => e.from === selected || e.to === selected).map(e => e.from === selected ? e.to : e.from)]]) {
       element('h3', label, $('details')); names.forEach(n => moduleButton(n, $('details'))); if (!names.length) element('p', 'None', $('details'), 'muted');

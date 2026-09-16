@@ -5,6 +5,7 @@ mod analyzer;
 mod cache;
 mod config;
 mod discovery;
+mod framework;
 mod git;
 mod metrics;
 mod parser;
@@ -90,6 +91,7 @@ fn main() -> Result<()> {
                 println!("Boundary violations:    {}", violations.len());
                 println!("Architecture health:    {}/100", metrics.health_score);
                 println!("Reachability mode:      {}", metrics.reachability_mode);
+                println!("Entry points:           {}", metrics.entry_points.len());
                 print_diagnostics(&report);
                 for cycle in &report.cycles {
                     println!("  ⚠ {}", cycle.join(" -> "));
@@ -119,6 +121,13 @@ fn main() -> Result<()> {
             }
             if report.diagnostics.iter().any(|d| d.code == "parse_error") {
                 failures.push("parse_errors");
+            }
+            if report
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "unresolved_config")
+            {
+                failures.push("configuration");
             }
             if strict
                 && report
