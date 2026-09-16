@@ -1,3 +1,98 @@
-use crate::{analyzer,git,metrics};use anyhow::{Context,Result};use std::{io::{Read,Write},net::TcpListener,path::Path};
-const HTML:&str=r#"<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width'><title>Archlens</title><style>body{font:14px system-ui;margin:0;background:#0b1020;color:#e8ecf3}header{padding:20px 28px;border-bottom:1px solid #283149}main{padding:28px;max-width:1200px;margin:auto}.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px}.card,.panel{background:#141b2d;border:1px solid #283149;border-radius:12px;padding:16px}.value{font-size:28px;font-weight:700}input{width:100%;box-sizing:border-box;padding:12px;margin:20px 0;background:#141b2d;border:1px solid #34405d;color:white;border-radius:8px}canvas{width:100%;height:520px}.bad{color:#ffb4a9}table{width:100%;border-collapse:collapse}td,th{text-align:left;padding:9px;border-bottom:1px solid #202940}</style></head><body><header><b>ARCHLENS</b> · See your frontend architecture</header><main><div class=cards id=cards></div><div id=impact></div><input id=q placeholder='Filter modules…'><div class=panel><canvas id=graph width=1100 height=520></canvas></div><h3>Cycles</h3><div id=cycles></div><h3>Modules</h3><table><thead><tr><th>Module</th><th>Out</th><th>In</th></tr></thead><tbody id=rows></tbody></table></main><script>let data;fetch('/api/report').then(r=>r.json()).then(d=>{data=d;render('')});q.oninput=e=>render(e.target.value.toLowerCase());function render(q){let a=data.analysis,m=data.metrics;cards.innerHTML=`<div class=card>Health<div class=value>${m.health_score}/100</div></div><div class=card>Modules<div class=value>${a.source_files}</div></div><div class=card>Dependencies<div class=value>${a.dependencies}</div></div><div class=card>Cycles<div class='value ${a.cycles.length?'bad':''}'>${a.cycles.length}</div></div>`;impact.innerHTML=data.diff?`<h3>Branch impact vs ${data.diff.base}</h3><div class=cards><div class=card>Changed files<div class=value>${data.diff.changed_source_files.length}</div></div><div class=card>Added deps<div class=value>${data.diff.added_dependencies.length}</div></div><div class=card>Removed deps<div class=value>${data.diff.removed_dependencies.length}</div></div><div class=card>New cycles<div class='value ${data.diff.new_cycles.length?'bad':''}'>${data.diff.new_cycles.length}</div></div></div>`:'';let inc={},out={};a.edges.forEach(e=>{out[e.from]=(out[e.from]||0)+1;inc[e.to]=(inc[e.to]||0)+1});rows.innerHTML=a.nodes.filter(n=>n.toLowerCase().includes(q)).map(n=>`<tr><td>${n}</td><td>${out[n]||0}</td><td>${inc[n]||0}</td></tr>`).join('');cycles.innerHTML=a.cycles.length?a.cycles.map(c=>`<div class='card bad'>${c.join(' → ')}</div>`).join(''):'<div class=card>No dependency cycles detected.</div>';draw(a,q)}function draw(a,q){let c=graph,x=c.getContext('2d'),nodes=a.nodes.slice(0,180),cycle=new Set(a.cycles.flat()),pos={};x.clearRect(0,0,c.width,c.height);let cx=c.width/2,cy=c.height/2,r=Math.min(cx,cy)-35;nodes.forEach((n,i)=>{let t=i/nodes.length*Math.PI*2;pos[n]=[cx+Math.cos(t)*r,cy+Math.sin(t)*r]});x.strokeStyle='#33405f';x.globalAlpha=.35;a.edges.forEach(e=>{if(pos[e.from]&&pos[e.to]){x.beginPath();x.moveTo(...pos[e.from]);x.lineTo(...pos[e.to]);x.stroke()}});x.globalAlpha=1;nodes.forEach(n=>{let[px,py]=pos[n],match=!q||n.toLowerCase().includes(q);x.beginPath();x.fillStyle=cycle.has(n)?'#ff7b72':match?'#8ab4ff':'#39445e';x.arc(px,py,match?4:2,0,Math.PI*2);x.fill()})}</script></body></html>"#;
-pub fn serve(root:&Path,port:u16,base:Option<&str>)->Result<()>{let report=analyzer::analyze(root)?;let metrics=metrics::calculate(&report);let diff=base.map(|b|git::diff(root,b,&report)).transpose()?;let json=serde_json::to_string(&serde_json::json!({"analysis":report,"metrics":metrics,"diff":diff}))?;let listener=TcpListener::bind(("127.0.0.1",port)).with_context(||format!("cannot bind port {port}"))?;println!("Archlens explorer: http://127.0.0.1:{port}");for stream in listener.incoming(){let mut stream=stream?;let mut request=[0u8;2048];let size=stream.read(&mut request)?;let req=String::from_utf8_lossy(&request[..size]);let api=req.starts_with("GET /api/report ");let(content_type,body)=if api{("application/json",json.as_str())}else{("text/html; charset=utf-8",HTML)};write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len())?;}Ok(())}
+use crate::{analyzer, git, metrics, rules};
+use anyhow::{Context, Result};
+use std::{
+    io::{Read, Write},
+    net::{TcpListener, TcpStream},
+    path::Path,
+    time::Duration,
+};
+const HTML: &str = include_str!("explorer.html");
+const JS: &str = include_str!("explorer.js");
+fn report(root: &Path, base: Option<&str>) -> Result<String> {
+    let analysis = analyzer::analyze(root)?;
+    let metrics = metrics::calculate(&analysis);
+    let violations = rules::evaluate(&analysis, &rules::load(root)?);
+    let diff = base.map(|b| git::diff(root, b, &analysis)).transpose()?;
+    Ok(serde_json::to_string(
+        &serde_json::json!({"analysis":analysis,"metrics":metrics,"violations":violations,"diff":diff}),
+    )?)
+}
+fn respond(mut stream: TcpStream, root: &Path, base: Option<&str>) -> Result<()> {
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    let mut request = Vec::new();
+    let mut chunk = [0; 1024];
+    while !request.windows(4).any(|w| w == b"\r\n\r\n") && request.len() < 8192 {
+        let size = stream.read(&mut chunk)?;
+        if size == 0 {
+            return Ok(());
+        }
+        request.extend_from_slice(&chunk[..size]);
+    }
+    let request = String::from_utf8_lossy(&request);
+    let mut parts = request.lines().next().unwrap_or("").split_whitespace();
+    let method = parts.next().unwrap_or("");
+    let path = parts.next().unwrap_or("");
+    let (status, content_type, body) = if method != "GET" {
+        (
+            "405 Method Not Allowed",
+            "text/plain",
+            "Only GET is supported".to_string(),
+        )
+    } else {
+        match path {
+            "/" => ("200 OK", "text/html; charset=utf-8", HTML.to_string()),
+            "/explorer.js" => ("200 OK", "text/javascript; charset=utf-8", JS.to_string()),
+            "/api/report" => match report(root, base) {
+                Ok(json) => ("200 OK", "application/json", json),
+                Err(error) => (
+                    "500 Internal Server Error",
+                    "text/plain; charset=utf-8",
+                    error.to_string(),
+                ),
+            },
+            _ => ("404 Not Found", "text/plain", "Not found".to_string()),
+        }
+    };
+    write!(stream,"HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: default-src 'self'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'\r\nConnection: close\r\n\r\n{body}",body.len())?;
+    Ok(())
+}
+pub fn serve(root: &Path, port: u16, base: Option<&str>) -> Result<()> {
+    let root = root.canonicalize()?;
+    // Fail early for invalid paths or refs, rather than serving an unusable page.
+    report(&root, base)?;
+    let listener = TcpListener::bind(("127.0.0.1", port))
+        .with_context(|| format!("cannot bind port {port}"))?;
+    println!("Oxarch explorer: http://{}", listener.local_addr()?);
+    for stream in listener.incoming() {
+        match stream {
+            Ok(stream) => {
+                if let Err(error) = respond(stream, &root, base) {
+                    eprintln!("Explorer request failed: {error}");
+                }
+            }
+            Err(error) => eprintln!("Explorer connection failed: {error}"),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn refresh_reanalyzes_files_and_reports_rule_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("main.ts"), "export {};").unwrap();
+        let first: serde_json::Value = serde_json::from_str(&report(root, None).unwrap()).unwrap();
+        assert_eq!(first["analysis"]["source_files"], 1);
+        std::fs::write(root.join("main.ts"), "import './added';").unwrap();
+        std::fs::write(root.join("added.ts"), "export {};").unwrap();
+        let second: serde_json::Value = serde_json::from_str(&report(root, None).unwrap()).unwrap();
+        assert_eq!(second["analysis"]["dependencies"], 1);
+        assert!(second["diff"].is_null());
+        std::fs::write(root.join("oxarch.json"), "invalid").unwrap();
+        assert!(report(root, None).is_err());
+    }
+}

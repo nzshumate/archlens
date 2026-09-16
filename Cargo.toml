@@ -1,10 +1,10 @@
 [package]
-name = "archlens"
+name = "oxarch"
 version = "0.2.0"
 edition = "2021"
 description = "A fast frontend architecture analyzer written in Rust"
-license = "MIT"
-repository = "https://github.com/nzshumate/archlens"
+license = "Apache-2.0"
+repository = "https://github.com/nzshumate/oxarch"
 
 [dependencies]
 anyhow = "1"
@@ -15,10 +15,8 @@ oxc_parser = "0.35"
 oxc_span = "0.35"
 petgraph = "0.6"
 rayon = "1"
-regex = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 walkdir = "2"
 
-[dev-dependencies]
 tempfile = "3"

@@ -1,82 +1,64 @@
-# Archlens
+# Oxarch
 
 > **See your frontend architecture.**
 
-Archlens is a Rust-powered architecture analyzer for TypeScript, React, and Vue frontends. It maps module dependencies, detects structural problems, enforces architecture boundaries, analyzes Git changes, and includes a local architecture explorer.
+Oxarch is a Rust-powered architecture analyzer for TypeScript, React, and Vue frontends. It maps module dependencies, detects structural problems, enforces architecture boundaries, compares Git branches, and includes a local interactive explorer.
 
-## What it does
+The original MVP and the previously deferred caching and graph/branch-visualization roadmap are implemented. Oxarch remains pre-1.0; the limitations below define the supported scope.
 
-- Scans `.ts`, `.tsx`, `.js`, `.jsx`, `.vue`, `.mjs`, and `.cjs`
-- Parses ES module imports/re-exports plus dynamic `import()` and CommonJS `require()`
-- Extracts Vue `<script>` and `<script setup>` content
-- Resolves relative imports, index modules, TypeScript aliases, extended/JSONC tsconfig files, and internal workspace packages
-- Builds a directed dependency graph and detects cycles
-- Calculates fan-in/fan-out, dead-module candidates, large-module/complexity signals, and an architecture health score
-- Enforces configurable layer/boundary rules from `archlens.json`
-- Reports Git branch impact with `archlens diff <base>`
-- Provides CI-friendly `archlens check` exit codes
-- Runs source parsing in parallel with Rayon
-- Includes an interactive local explorer via `archlens dev`
-- Includes unit/integration coverage and GitHub Actions validation
+## Quick start
 
-## Why Rust?
-
-Architecture analysis is filesystem-, parsing-, graph-, and CPU-heavy work. Rust gives Archlens a native core with predictable memory use, safe parallelism, and a standalone binary that is well suited to local development and CI. Archlens deliberately avoids publishing performance claims until they are backed by reproducible benchmark results.
-
-## Install
+Requirements: a current stable Rust toolchain; Git for branch comparisons; Python 3 for the optional benchmark scripts. No Node runtime is required to run Oxarch or its explorer.
 
 ```bash
-git clone https://github.com/nzshumate/archlens.git
-cd archlens
-cargo build --release
+git clone https://github.com/nzshumate/oxarch.git
+cd oxarch
+cargo build --release --locked
+
+./target/release/oxarch analyze /path/to/frontend
+./target/release/oxarch dev /path/to/frontend --port 4242
 ```
 
-The binary is available at `target/release/archlens`.
+Open `http://127.0.0.1:4242`. The explorer binds only to the loopback interface and bundles its assets into the binary; it does not require a CDN or upload source files.
 
-## CLI
-
-Analyze a repository:
+To install the CLI on your PATH:
 
 ```bash
-archlens analyze ./path/to/frontend
+cargo install --path . --locked
 ```
 
-Emit the complete machine-readable report:
+## Commands
 
-```bash
-archlens analyze ./path/to/frontend --json
-```
+| Command | Purpose |
+| --- | --- |
+| `oxarch analyze [path]` | Print graph counts, health, and structural findings |
+| `oxarch analyze [path] --json` | Emit analysis, metrics, and boundary violations as JSON |
+| `oxarch analyze [path] --no-cache` | Analyze without reading or writing the parser cache |
+| `oxarch check [path] --min-health 80` | Enforce boundaries, health, and absence of cycles |
+| `oxarch check [path] --allow-cycles` | Allow cycles while enforcing health and boundaries |
+| `oxarch diff <base> [path] --json` | Compare the current tree against the branch merge base |
+| `oxarch dev [path] --port 4242` | Launch the local explorer |
+| `oxarch dev [path] --base main` | Explore the graph with branch-impact overlays |
 
-Enforce architecture health in CI:
+The default path is `.`. `check` defaults to a minimum health score of 70; accepted thresholds are 0–100. Failed checks, unreadable source files, invalid architecture rules, and Git errors produce a nonzero exit status.
 
-```bash
-archlens check . --min-health 80
-```
+## Analysis
 
-Allow existing cycles while still enforcing health and boundary rules:
+- Discovers `.ts`, `.tsx`, `.js`, `.jsx`, `.vue`, `.mjs`, and `.cjs` source files.
+- Uses Oxc to parse static imports, re-exports, literal dynamic `import()`, and bare `require()` calls. Comments and ordinary strings do not create dependencies.
+- Extracts inline Vue `<script>` and `<script setup>` blocks.
+- Resolves relative paths, dotted module names such as `./user.service`, index modules, TypeScript path aliases, JSONC/relative tsconfig extensions, and common internal workspace packages.
+- Parses sources in parallel with Rayon, then builds a directed graph with one edge per importing/imported module pair.
+- Detects strongly connected cycle groups, including self-imports. A group is a set of mutually reachable modules, not a guaranteed ordered cycle path.
+- Reports fan-in/fan-out hubs, orphan/dead-module candidates, modules with at least 300 lines, and an architecture health score.
 
-```bash
-archlens check . --min-health 80 --allow-cycles
-```
+Generated/vendor directories named `node_modules`, `.git`, `dist`, `build`, `.next`, `.nuxt`, `coverage`, and `target` are skipped. Discovery does not otherwise follow `.gitignore` patterns.
 
-Inspect architectural impact relative to a Git ref:
+The health score subtracts penalties for modules in cycles, dead-module candidates, and large modules. It is an opinionated signal, not a universal quality rating. Boundary violations are enforced separately.
 
-```bash
-archlens diff main .
-archlens diff main . --json
-```
+## Architecture boundaries
 
-Launch the local explorer:
-
-```bash
-archlens dev . --port 4242
-```
-
-Then open `http://127.0.0.1:4242`.
-
-## Architecture rules
-
-Create `archlens.json` at the repository root:
+Create `oxarch.json` at the analysis root:
 
 ```json
 {
@@ -84,128 +66,166 @@ Create `archlens.json` at the repository root:
     {
       "from": "src/ui/",
       "disallow": "src/data/",
-      "message": "UI modules must use the service layer instead of importing data modules directly"
+      "message": "UI modules must use the service layer"
     }
   ]
 }
 ```
 
-`archlens check` exits non-zero when a configured boundary is violated, the health score falls below the requested threshold, or cycles are present unless `--allow-cycles` is supplied.
+Rules match path prefixes. A trailing `/` makes a directory boundary explicit. `oxarch check` fails if any matching dependency violates a rule, even when cycles are allowed or the health score is high. Missing configuration means no boundary rules; malformed configuration is an error, not a silent pass.
 
-See `archlens.example.json` for a copyable example.
+See [oxarch.example.json](oxarch.example.json) for a copyable example.
+
+## Incremental cache
+
+Every normal analysis maintains `target/oxarch/parsed-v1.json` inside the analyzed project. Add `target/` to that project's `.gitignore` if needed.
+
+- Cached entries contain source text, extracted imports, and line counts.
+- Exact content comparison reuses parsing results for unchanged files; modified and new files are parsed again, and deleted entries are removed.
+- It works in dirty Git worktrees and directories without Git.
+- Import resolution, configuration/workspace discovery, graph construction, metrics, and rules run fresh every time. Changing a tsconfig alias cannot leave an old resolved edge in the report.
+- Cache writes are atomic. Missing, corrupt, incompatible, or unwritable caches do not prevent analysis.
+- `--no-cache` bypasses the cache for independent validation and uncached measurements. Removing `target/oxarch` resets it.
+
+This is incremental **parsing**, not a filesystem watcher or an incremental graph engine. Files are still read to validate their contents. The cache stores local source text; treat it like the source tree and do not publish it.
+
+## Git branch impact
+
+```bash
+oxarch diff main /path/to/frontend
+oxarch diff main /path/to/frontend --json
+oxarch dev /path/to/frontend --base main
+```
+
+Oxarch resolves `main` to a commit and compares the current working tree with `git merge-base main HEAD`. This excludes changes made only on the base branch after divergence. Staged, unstaged, and newly discovered source files are included; the analysis root can be a subdirectory of the Git repository.
+
+The report includes:
+
+- Merge-base commit and changed source files, including deleted files.
+- Added and removed dependencies, both as readable labels and structured `added_edges`/`removed_edges` arrays.
+- Deleted modules, new cycle groups, and current cycle count.
+- Transitively affected importing modules across both the previous and current graphs. Resolution-only edge changes also seed this impact calculation.
+
+`affected_dependencies` counts distinct previous/current edges touching the affected module set. Renames appear as deletion plus addition. A detached temporary worktree supplies the base snapshot and is removed after analysis, including when analysis fails. Git must permit creating temporary worktrees.
+
+## Interactive explorer
+
+The explorer includes:
+
+- Health, module, dependency, cycle, and boundary-violation summaries.
+- Dependency-layer and circular layouts with directed arrows.
+- Clickable and keyboard-selectable nodes, incoming/outgoing dependency details, and removed connections.
+- Search and all/cycle/changed/affected filters.
+- Drag-to-pan, scroll/button zoom, and fit-to-graph controls.
+- Added edges in green; removed edges and deleted nodes in dashed pink; cycle borders in amber.
+- Branch summaries, changed modules, cycle groups, and boundary explanations.
+- **Refresh analysis** to reread sources and recompute the report without restarting the server.
+
+The graph and module table show 100 matching modules per page; previous/next controls expose all results. Edges are drawn only when both endpoints are visible on that page. Module details still list all its current connections. Use search to narrow a large project. Changed/affected views require `--base`.
+
+The explorer analyzes on demand, not automatically on filesystem changes. Filenames, rule messages, and branch labels are rendered as text rather than HTML. API failures are shown in the status area and can be retried with Refresh.
 
 ## Architecture
 
 ```text
-Frontend repository
-        |
-        v
- filesystem discovery
-        |
-        v
- parallel source parsing
-      (Oxc)
-        |
-        v
- import resolution
- relative / tsconfig / workspace
-        |
-        v
- directed dependency graph
-        |
-        +--> cycle detection
-        +--> fan-in / fan-out
-        +--> dead-code candidates
-        +--> complexity signals
-        +--> boundary rules
-        +--> Git impact analysis
-        |
-        +--> CLI / JSON / CI
-        |
-        `--> local explorer
+Source discovery → content-validated parser cache → parallel Oxc parsing
+                         ↓
+        fresh import resolution (relative / tsconfig / workspace)
+                         ↓
+              directed dependency graph
+                         ↓
+       cycles / metrics / boundaries / Git impact
+                         ↓
+                CLI · JSON · CI · explorer
 ```
-
-## Commands
-
-| Command | Purpose |
-| --- | --- |
-| `archlens analyze [path]` | Analyze a frontend repository |
-| `archlens analyze [path] --json` | Emit the complete graph and metrics |
-| `archlens check [path]` | Enforce architecture requirements in CI |
-| `archlens diff <base> [path]` | Show architectural impact since a Git base ref |
-| `archlens dev [path]` | Launch the local architecture explorer |
 
 ## Roadmap status
 
-The original MVP roadmap is implemented:
-
 ### Analysis core
 
-- [x] Native Rust CLI
-- [x] Source-file discovery
-- [x] Oxc-based source parsing
-- [x] Vue script extraction
-- [x] Static imports and re-exports
-- [x] Dynamic `import()` and CommonJS `require()` discovery
-- [x] Dependency graph construction
-- [x] Circular dependency detection
-- [x] TypeScript path aliases
-- [x] JSONC and extended tsconfig support
-- [x] Internal workspace/package resolution
-- [x] JSON graph output
-- [x] Parser, metric, rule, and integration tests
+- [x] Native Rust CLI and source discovery
+- [x] Oxc parsing, Vue script extraction, imports and re-exports
+- [x] Literal dynamic imports and CommonJS calls
+- [x] Relative/index/dotted imports, TypeScript aliases, JSONC and relative tsconfig extensions
+- [x] Common internal workspace package resolution
+- [x] Dependency graph, cycle groups, self-import detection, and JSON output
+- [x] Parser, resolver, metric, rule, and CLI regression tests
 
 ### Architecture intelligence
 
-- [x] Dead/unreachable-module candidates
-- [x] High fan-in/fan-out modules
-- [x] Configurable architecture boundaries
-- [x] Layer violations
-- [x] Module size/complexity signals
-- [x] Architecture health summary
+- [x] Orphan/dead-module candidates and fan-in/fan-out hubs
+- [x] Configurable layer/boundary rules with CI enforcement
+- [x] Module size signals and architecture health summary
 
 ### Git-aware analysis
 
-- [x] `archlens diff <base>`
-- [x] Changed-source detection
-- [x] Affected dependency reporting
-- [x] Current-tree cycle impact
-- [x] CI-friendly exit codes and output
+- [x] Merge-base comparison with `oxarch diff <base>`
+- [x] Changed/deleted/uncommitted source files and nested analysis roots
+- [x] Added/removed dependencies and new cycle groups
+- [x] Transitive importing-module impact
+- [x] CI exit codes and machine-readable reports
 
 ### Explorer
 
-- [x] `archlens dev`
-- [x] Local architecture dashboard
-- [x] Module search/filtering
-- [x] Dependency/fan-in/fan-out exploration
-- [x] Cycle and health visibility
+- [x] Local architecture dashboard, search, and module details
+- [x] Dependency and circular graph layouts, node selection, pan/zoom/fit
+- [x] Cycle, health, and boundary visibility
+- [x] Branch-diff graph overlays and deleted modules
+- [x] Filters, pagination, and on-demand refresh
 
 ### Performance and quality
 
-- [x] Parallel source analysis with Rayon
-- [x] Benchmark harness for repeatable measurements
-- [x] CI formatting, Clippy, tests, and end-to-end self-analysis
-- [x] No unverified performance claims in documentation
-
-Incremental on-disk caching and richer graph-layout/branch-diff visualization are intentionally tracked as post-MVP optimization work rather than prerequisites for the original usable release.
+- [x] Parallel parsing with Rayon
+- [x] Content-validated incremental on-disk parser cache
+- [x] Corruption recovery and uncached validation mode
+- [x] Synthetic corpus generator and portable cold/warm benchmark harness
+- [x] Locked dependencies and strict formatting, Clippy, tests, and self-analysis in CI
+- [x] Linux/macOS CI configuration and cold/warm result equivalence check
+- [x] No unsupported performance claims
 
 ## Verification
 
-GitHub Actions validates the project on every push and pull request by normalizing formatting, running Clippy with warnings denied, running the complete test suite, and running Archlens against its own repository. The project is not considered releasable when that pipeline is red.
+```bash
+cargo fmt --all --check
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked --all
+cargo run --locked -- analyze . --json
+node --check src/explorer.js
+python3 scripts/smoke-explorer.py
+```
 
-## Design principles
+The GitHub Actions workflow runs these checks on Linux and macOS, plus HTTP asset/routing/refresh/error-recovery checks and a generated-corpus cold/warm equivalence check. Self-analysis is a smoke test; the integration fixtures provide meaningful frontend dependency coverage. Local verification does not imply a remote GitHub Actions run has passed.
 
-1. **Measure, don't market.** Publish benchmark numbers only when they are reproducible.
-2. **Useful without a UI.** CLI and JSON are first-class interfaces.
-3. **Understand modern frontends.** TypeScript, Vue, React, aliases, and workspaces are core use cases.
-4. **Actionable analysis.** Surface structural problems developers can act on, not merely a decorative graph.
-5. **Fast enough for every PR.** CI is a primary use case.
-6. **Deterministic before AI.** Core architecture analysis should remain explainable and reproducible.
+Tests cover dotted imports, parser false positives, JSONC strings, cache edits/deletions/config changes/corruption, self-cycles, boundary enforcement, refresh behavior, and divergent/nested/dirty Git comparisons with worktree cleanup.
+
+## Reproducible benchmarks
+
+```bash
+python3 scripts/generate-corpus.py 5000 /tmp/oxarch-corpus
+RUNS=5 bash scripts/benchmark.sh /tmp/oxarch-corpus
+```
+
+The harness builds the release binary and prints JSON with each run's wall time and the median for uncached and warm-cache analysis. It works on macOS and Linux. Parsing is only part of total analysis cost, so warm caching is not guaranteed to improve every workload.
+
+For an existing binary:
+
+```bash
+python3 scripts/benchmark.py /tmp/oxarch-corpus --binary target/release/oxarch --runs 5
+```
+
+An optional `bash scripts/compare-node.sh /path/to/frontend` runs Oxarch and Madge. It may download Madge through `npx`; the tools have different analysis semantics, and its timings include process startup. Do not present this as a like-for-like speed claim.
 
 ## Current limitations
 
-Archlens is still pre-1.0. Dead-module detection is heuristic because application entry points vary by framework. The health score is an opinionated signal rather than a universal measure of code quality. Workspace and tsconfig resolution cover common frontend layouts but do not yet attempt to reproduce every edge case in Node/TypeScript module resolution.
+- Entry points and dead-module candidates use filename heuristics; no framework-specific reachability model is implied.
+- Module size is measured in lines, not cyclomatic complexity.
+- Dynamic runtime expressions cannot be resolved. Bare `require` calls are detected syntactically, without checking whether that identifier is locally shadowed.
+- Vue extraction covers inline script blocks, not a full single-file-component compiler or external `src` scripts.
+- TypeScript/workspace resolution handles common layouts, not every Node/TypeScript resolution mode. Package `exports` conditions, project references, package-based tsconfig extensions, and `.mts`/`.cts` sources are not implemented. Internal package discovery is limited to four directory levels and assumes `src/index` or `src/<subpath>` entry points.
+- TypeScript parse recovery is best effort; this tool does not replace a compiler/type checker.
+- The explorer is a local, single-request-at-a-time development server, not a public hosting service.
+- The graph is paginated for usability; very large graphs may require focused filtering.
 
 ## License
 
-MIT
+Copyright 2026 Nathan Shumate. Licensed under the [Apache License, Version 2.0](LICENSE).

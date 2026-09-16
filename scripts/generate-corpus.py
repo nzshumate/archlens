@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 import pathlib, sys
 count = int(sys.argv[1]) if len(sys.argv) > 1 else 5000
-root = pathlib.Path(sys.argv[2] if len(sys.argv) > 2 else '/tmp/archlens-corpus')
+root = pathlib.Path(sys.argv[2] if len(sys.argv) > 2 else '/tmp/oxarch-corpus')
 root.mkdir(parents=True, exist_ok=True)
 for i in range(count):
     deps = []

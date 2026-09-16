@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 TARGET="${1:-.}"
-cargo build --release >/dev/null
-echo "Archlens (release)"
-/usr/bin/time -f '%e sec, %M KB max RSS' ./target/release/archlens analyze "$TARGET" --json >/dev/null
+cargo build --release --locked
+# POSIX time works on macOS and Linux. These tools have different semantics;
+# this is an exploratory comparison, not a like-for-like speed claim.
+printf 'Oxarch (release, uncached)\n'
+time -p ./target/release/oxarch analyze "$TARGET" --no-cache --json >/dev/null
 if command -v npx >/dev/null 2>&1; then
-  echo "madge (npx, dependency graph JSON)"
-  /usr/bin/time -f '%e sec, %M KB max RSS' npx --yes madge "$TARGET" --json >/dev/null
+  printf 'madge (includes npx startup; may include package download)\n'
+  time -p npx --yes madge "$TARGET" --extensions ts,tsx,js,jsx --json >/dev/null
 else
-  echo "npx unavailable; skipping Node comparison"
+  printf 'npx unavailable; skipping Node comparison\n'
 fi

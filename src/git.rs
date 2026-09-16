@@ -1,5 +1,191 @@
-use crate::analyzer::{self,AnalysisReport};use anyhow::{bail,Context,Result};use serde::Serialize;use std::{collections::HashSet,fs,path::Path,process::Command,time::{SystemTime,UNIX_EPOCH}};
-#[derive(Debug,Serialize)]pub struct DiffReport{pub base:String,pub changed_source_files:Vec<String>,pub affected_dependencies:usize,pub added_dependencies:Vec<String>,pub removed_dependencies:Vec<String>,pub new_cycles:Vec<Vec<String>>,pub cycles_in_current_tree:usize}
-pub fn diff(root:&Path,base:&str,report:&AnalysisReport)->Result<DiffReport>{let range=format!("{base}...HEAD");let output=Command::new("git").arg("diff").arg("--name-only").arg(&range).current_dir(root).output().context("failed to run git diff")?;if !output.status.success(){bail!("git diff failed for base '{base}': {}",String::from_utf8_lossy(&output.stderr));}let known=report.nodes.iter().map(String::as_str).collect::<HashSet<_>>();let mut changed_source_files=String::from_utf8_lossy(&output.stdout).lines().filter(|p|known.contains(*p)).map(str::to_owned).collect::<Vec<_>>();changed_source_files.sort();let changed=changed_source_files.iter().map(String::as_str).collect::<HashSet<_>>();let affected_dependencies=report.edges.iter().filter(|e|changed.contains(e.from.as_str())||changed.contains(e.to.as_str())).count();
-let base_report=analyze_base(root,base)?;let current_edges=report.edges.iter().map(|e|format!("{} -> {}",e.from,e.to)).collect::<HashSet<_>>();let base_edges=base_report.edges.iter().map(|e|format!("{} -> {}",e.from,e.to)).collect::<HashSet<_>>();let mut added_dependencies=current_edges.difference(&base_edges).cloned().collect::<Vec<_>>();let mut removed_dependencies=base_edges.difference(&current_edges).cloned().collect::<Vec<_>>();added_dependencies.sort();removed_dependencies.sort();let base_cycles=base_report.cycles.iter().map(|c|{let mut x=c.clone();x.sort();x.join("|")}).collect::<HashSet<_>>();let new_cycles=report.cycles.iter().filter(|c|{let mut x=(*c).clone();x.sort();!base_cycles.contains(&x.join("|"))}).cloned().collect();Ok(DiffReport{base:base.into(),changed_source_files,affected_dependencies,added_dependencies,removed_dependencies,new_cycles,cycles_in_current_tree:report.cycles.len()})}
-fn analyze_base(root:&Path,base:&str)->Result<AnalysisReport>{let stamp=SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();let temp=std::env::temp_dir().join(format!("archlens-{}-{stamp}",std::process::id()));let status=Command::new("git").args(["worktree","add","--detach"]).arg(&temp).arg(base).current_dir(root).status().context("failed to create temporary git worktree")?;if !status.success(){bail!("could not create worktree for '{base}'");}let result=analyzer::analyze(&temp);let _=Command::new("git").args(["worktree","remove","--force"]).arg(&temp).current_dir(root).status();let _=fs::remove_dir_all(&temp);result}
+use crate::analyzer::{self, AnalysisReport, DependencyEdge};
+use anyhow::{bail, Context, Result};
+use serde::Serialize;
+use std::{
+    collections::{BTreeSet, HashSet},
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
+
+#[derive(Debug, Serialize)]
+pub struct DiffReport {
+    pub base: String,
+    pub merge_base: String,
+    pub changed_source_files: Vec<String>,
+    pub deleted_source_files: Vec<String>,
+    pub affected_modules: Vec<String>,
+    pub affected_dependencies: usize,
+    pub added_dependencies: Vec<String>,
+    pub removed_dependencies: Vec<String>,
+    pub added_edges: Vec<DependencyEdge>,
+    pub removed_edges: Vec<DependencyEdge>,
+    pub new_cycles: Vec<Vec<String>>,
+    pub cycles_in_current_tree: usize,
+}
+fn git(root: &Path, args: &[&str]) -> Result<String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .context("failed to run git")?;
+    if !output.status.success() {
+        bail!("git failed: {}", String::from_utf8_lossy(&output.stderr));
+    }
+    Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+}
+struct Snapshot {
+    repository: PathBuf,
+    tree: PathBuf,
+    _temp: tempfile::TempDir,
+}
+impl Drop for Snapshot {
+    fn drop(&mut self) {
+        let _ = Command::new("git")
+            .args(["worktree", "remove", "--force"])
+            .arg(&self.tree)
+            .current_dir(&self.repository)
+            .output();
+    }
+}
+pub fn diff(root: &Path, base: &str, report: &AnalysisReport) -> Result<DiffReport> {
+    let root = root.canonicalize()?;
+    let repository =
+        PathBuf::from(git(&root, &["rev-parse", "--show-toplevel"])?).canonicalize()?;
+    let prefix = root.strip_prefix(&repository)?;
+    let reference = git(
+        &repository,
+        &[
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            &format!("{base}^{{commit}}"),
+        ],
+    )?;
+    let merge_base = git(&repository, &["merge-base", &reference, "HEAD"])?;
+    let temp = tempfile::tempdir()?;
+    let tree = temp.path().join("tree");
+    let output = Command::new("git")
+        .args(["worktree", "add", "--detach"])
+        .arg(&tree)
+        .arg(&merge_base)
+        .current_dir(&repository)
+        .output()?;
+    if !output.status.success() {
+        bail!(
+            "cannot create base snapshot: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let snapshot = Snapshot {
+        repository: repository.clone(),
+        tree,
+        _temp: temp,
+    };
+    let base_root = snapshot.tree.join(prefix);
+    // A newly created frontend directory has an empty base graph.
+    let empty = tempfile::tempdir()?;
+    let base_report = analyzer::analyze_with_cache(
+        if base_root.exists() {
+            &base_root
+        } else {
+            empty.path()
+        },
+        false,
+    )?;
+    let all_nodes = report
+        .nodes
+        .iter()
+        .chain(&base_report.nodes)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut changed_source_files = Vec::new();
+    for node in all_nodes {
+        let read = |path: PathBuf| -> Result<Option<Vec<u8>>> {
+            match fs::read(path) {
+                Ok(bytes) => Ok(Some(bytes)),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(error.into()),
+            }
+        };
+        if read(root.join(&node))? != read(base_root.join(&node))? {
+            changed_source_files.push(node);
+        }
+    }
+    let current_nodes = report.nodes.iter().collect::<HashSet<_>>();
+    let deleted_source_files = base_report
+        .nodes
+        .iter()
+        .filter(|n| !current_nodes.contains(n))
+        .cloned()
+        .collect();
+    let edge_set = |r: &AnalysisReport| {
+        r.edges
+            .iter()
+            .map(|e| (e.from.clone(), e.to.clone()))
+            .collect::<BTreeSet<_>>()
+    };
+    let current = edge_set(report);
+    let previous = edge_set(&base_report);
+    let edges = |set: Vec<&(String, String)>| {
+        set.into_iter()
+            .map(|(from, to)| DependencyEdge {
+                from: from.clone(),
+                to: to.clone(),
+            })
+            .collect::<Vec<_>>()
+    };
+    let added_edges = edges(current.difference(&previous).collect());
+    let removed_edges = edges(previous.difference(&current).collect());
+    let labels = |edges: &[DependencyEdge]| {
+        edges
+            .iter()
+            .map(|e| format!("{} -> {}", e.from, e.to))
+            .collect()
+    };
+    let mut affected = changed_source_files
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    // Resolution-only changes (tsconfig/package edits) also affect both endpoints.
+    for edge in added_edges.iter().chain(&removed_edges) {
+        affected.insert(edge.from.clone());
+        affected.insert(edge.to.clone());
+    }
+    loop {
+        let before = affected.len();
+        for (from, to) in current.union(&previous) {
+            if affected.contains(to) {
+                affected.insert(from.clone());
+            }
+        }
+        if affected.len() == before {
+            break;
+        }
+    }
+    let affected_dependencies = current
+        .union(&previous)
+        .filter(|(from, to)| affected.contains(from) || affected.contains(to))
+        .count();
+    let base_cycles = base_report.cycles.iter().cloned().collect::<HashSet<_>>();
+    let new_cycles = report
+        .cycles
+        .iter()
+        .filter(|c| !base_cycles.contains(*c))
+        .cloned()
+        .collect();
+    Ok(DiffReport {
+        base: base.into(),
+        merge_base,
+        changed_source_files,
+        deleted_source_files,
+        affected_modules: affected.into_iter().collect(),
+        affected_dependencies,
+        added_dependencies: labels(&added_edges),
+        removed_dependencies: labels(&removed_edges),
+        added_edges,
+        removed_edges,
+        new_cycles,
+        cycles_in_current_tree: report.cycles.len(),
+    })
+}

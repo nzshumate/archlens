@@ -1,9 +1,46 @@
-use crate::analyzer::AnalysisReport;
-use serde::{Deserialize,Serialize};
-use std::{fs,path::Path,process::Command};
+//! Content-validated parser cache. Resolution and graph construction always run fresh.
+use serde::{Deserialize, Serialize};
+use std::{collections::HashMap, fs, io::Write, path::Path};
 
-#[derive(Serialize,Deserialize)] struct Cached { head:String, report:AnalysisReport }
-fn git(root:&Path,args:&[&str])->Option<String>{let out=Command::new("git").args(args).current_dir(root).output().ok()?;out.status.success().then(||String::from_utf8_lossy(&out.stdout).trim().to_string())}
-fn clean_head(root:&Path)->Option<String>{let status=git(root,&["status","--porcelain"])?;if !status.is_empty(){return None;}git(root,&["rev-parse","HEAD"])}
-pub fn load(root:&Path)->Option<AnalysisReport>{let head=clean_head(root)?;let raw=fs::read_to_string(root.join("target/archlens/report.json")).ok()?;let cached:Cached=serde_json::from_str(&raw).ok()?;(cached.head==head).then_some(cached.report)}
-pub fn save(root:&Path,report:&AnalysisReport){let Some(head)=clean_head(root)else{return;};let dir=root.join("target/archlens");if fs::create_dir_all(&dir).is_err(){return;}if let Ok(raw)=serde_json::to_string(&Cached{head,report:report.clone()}){let _=fs::write(dir.join("report.json"),raw);}}
+const VERSION: u32 = 1;
+#[derive(Clone, Deserialize, Serialize)]
+pub struct ParsedSource {
+    pub source: String,
+    pub imports: Vec<String>,
+    pub lines: usize,
+}
+#[derive(Deserialize, Serialize)]
+pub struct Cache {
+    version: u32,
+    pub entries: HashMap<String, ParsedSource>,
+}
+impl Default for Cache {
+    fn default() -> Self {
+        Self {
+            version: VERSION,
+            entries: HashMap::new(),
+        }
+    }
+}
+impl Cache {
+    pub fn load(root: &Path) -> Self {
+        fs::read(root.join("target/oxarch/parsed-v1.json"))
+            .ok()
+            .and_then(|raw| serde_json::from_slice::<Self>(&raw).ok())
+            .filter(|cache| cache.version == VERSION)
+            .unwrap_or_default()
+    }
+    pub fn save(&self, root: &Path) {
+        let dir = root.join("target/oxarch");
+        // Cache failures must never prevent analysis. A temporary file and rename
+        // keep concurrent readers from observing partially serialized data.
+        let write = || -> anyhow::Result<()> {
+            fs::create_dir_all(&dir)?;
+            let mut temp = tempfile::NamedTempFile::new_in(&dir)?;
+            temp.write_all(&serde_json::to_vec(self)?)?;
+            temp.persist(dir.join("parsed-v1.json"))?;
+            Ok(())
+        };
+        let _ = write();
+    }
+}
