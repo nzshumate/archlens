@@ -2,47 +2,97 @@
 
 > **See your frontend architecture.**
 
-Archlens is a Rust-powered architecture analyzer for TypeScript frontends that maps dependencies, detects structural problems, and shows how code changes affect your application.
+Archlens is a Rust-powered architecture analyzer for TypeScript, React, and Vue frontends. It maps module dependencies, detects structural problems, enforces architecture boundaries, analyzes Git changes, and includes a local architecture explorer.
 
-Archlens is early-stage and under active development. The goal is a fast native developer tool that can analyze large TypeScript, React, and Vue codebases locally and in CI, then expose the resulting architecture graph to an interactive frontend.
+## What it does
+
+- Scans `.ts`, `.tsx`, `.js`, `.jsx`, `.vue`, `.mjs`, and `.cjs`
+- Parses ES module imports/re-exports plus dynamic `import()` and CommonJS `require()`
+- Extracts Vue `<script>` and `<script setup>` content
+- Resolves relative imports, index modules, TypeScript aliases, extended/JSONC tsconfig files, and internal workspace packages
+- Builds a directed dependency graph and detects cycles
+- Calculates fan-in/fan-out, dead-module candidates, large-module/complexity signals, and an architecture health score
+- Enforces configurable layer/boundary rules from `archlens.json`
+- Reports Git branch impact with `archlens diff <base>`
+- Provides CI-friendly `archlens check` exit codes
+- Runs source parsing in parallel with Rayon
+- Includes an interactive local explorer via `archlens dev`
+- Includes unit/integration coverage and GitHub Actions validation
 
 ## Why Rust?
 
-Architecture analysis is filesystem-, parsing-, and graph-heavy work. Rust gives Archlens a native core with predictable memory use, strong concurrency options, and the ability to ship as a standalone binary. Performance claims will be benchmarked rather than assumed.
+Architecture analysis is filesystem-, parsing-, graph-, and CPU-heavy work. Rust gives Archlens a native core with predictable memory use, safe parallelism, and a standalone binary that is well suited to local development and CI. Archlens deliberately avoids publishing performance claims until they are backed by reproducible benchmark results.
 
-## Current capabilities
-
-- Scans `.ts`, `.tsx`, `.js`, `.jsx`, `.vue`, `.mjs`, and `.cjs`
-- Ignores generated/vendor directories such as `node_modules`, `dist`, `.next`, `.nuxt`, and `coverage`
-- Parses ES module imports and re-exports with the Oxc parser rather than regex
-- Extracts imports from Vue script blocks
-- Resolves relative imports and common index-file imports
-- Reads `baseUrl` and `paths` from `tsconfig.json`
-- Builds a directed module dependency graph
-- Detects circular dependency groups
-- Emits graph nodes and edges as JSON for visualization and integrations
-- Runs formatting, Clippy, and tests in GitHub Actions
-
-## Install and run
-
-You need a current Rust toolchain.
+## Install
 
 ```bash
+git clone https://github.com/nzshumate/archlens.git
+cd archlens
 cargo build --release
-./target/release/archlens analyze ./path/to/frontend
 ```
 
-During development:
+The binary is available at `target/release/archlens`.
+
+## CLI
+
+Analyze a repository:
 
 ```bash
-cargo run -- analyze ./path/to/frontend
+archlens analyze ./path/to/frontend
 ```
 
-Get the full dependency graph as JSON:
+Emit the complete machine-readable report:
 
 ```bash
-cargo run -- analyze ./path/to/frontend --json
+archlens analyze ./path/to/frontend --json
 ```
+
+Enforce architecture health in CI:
+
+```bash
+archlens check . --min-health 80
+```
+
+Allow existing cycles while still enforcing health and boundary rules:
+
+```bash
+archlens check . --min-health 80 --allow-cycles
+```
+
+Inspect architectural impact relative to a Git ref:
+
+```bash
+archlens diff main .
+archlens diff main . --json
+```
+
+Launch the local explorer:
+
+```bash
+archlens dev . --port 4242
+```
+
+Then open `http://127.0.0.1:4242`.
+
+## Architecture rules
+
+Create `archlens.json` at the repository root:
+
+```json
+{
+  "boundaries": [
+    {
+      "from": "src/ui/",
+      "disallow": "src/data/",
+      "message": "UI modules must use the service layer instead of importing data modules directly"
+    }
+  ]
+}
+```
+
+`archlens check` exits non-zero when a configured boundary is violated, the health score falls below the requested threshold, or cycles are present unless `--allow-cycles` is supplied.
+
+See `archlens.example.json` for a copyable example.
 
 ## Architecture
 
@@ -50,103 +100,111 @@ cargo run -- analyze ./path/to/frontend --json
 Frontend repository
         |
         v
-  filesystem scanner
+ filesystem discovery
         |
         v
-   Oxc AST parser
+ parallel source parsing
+      (Oxc)
         |
         v
- import resolver
-(relative + tsconfig aliases)
+ import resolution
+ relative / tsconfig / workspace
         |
         v
- dependency graph
+ directed dependency graph
         |
-        +--> cycle analysis
-        +--> architecture rules
-        +--> diff analysis
-        +--> JSON graph API
-                  |
-                  v
-          interactive UI
+        +--> cycle detection
+        +--> fan-in / fan-out
+        +--> dead-code candidates
+        +--> complexity signals
+        +--> boundary rules
+        +--> Git impact analysis
+        |
+        +--> CLI / JSON / CI
+        |
+        `--> local explorer
 ```
 
-The Rust core owns scanning, parsing, resolution, graph construction, and analysis. The planned web UI will focus on exploration and visualization rather than duplicating analysis logic in JavaScript.
+## Commands
 
-## Planned CLI
+| Command | Purpose |
+| --- | --- |
+| `archlens analyze [path]` | Analyze a frontend repository |
+| `archlens analyze [path] --json` | Emit the complete graph and metrics |
+| `archlens check [path]` | Enforce architecture requirements in CI |
+| `archlens diff <base> [path]` | Show architectural impact since a Git base ref |
+| `archlens dev [path]` | Launch the local architecture explorer |
 
-```text
-archlens analyze [path]       Analyze a repository
-archlens analyze --json       Emit the complete graph
-archlens diff <base>          Show architectural impact of a branch
-archlens check                Enforce architecture rules in CI
-archlens dev                  Launch the interactive architecture explorer
-```
+## Roadmap status
 
-`diff`, `check`, and `dev` are roadmap commands and are not implemented yet.
+The original MVP roadmap is implemented:
 
-## Roadmap
-
-### 0.1 — analysis core
+### Analysis core
 
 - [x] Native Rust CLI
 - [x] Source-file discovery
-- [x] AST-based ES module parsing
+- [x] Oxc-based source parsing
 - [x] Vue script extraction
+- [x] Static imports and re-exports
+- [x] Dynamic `import()` and CommonJS `require()` discovery
 - [x] Dependency graph construction
 - [x] Circular dependency detection
-- [x] Basic `tsconfig` aliases
+- [x] TypeScript path aliases
+- [x] JSONC and extended tsconfig support
+- [x] Internal workspace/package resolution
 - [x] JSON graph output
-- [x] GitHub Actions validation
-- [ ] Dynamic `import()` and CommonJS AST support
-- [ ] Full JSONC/extended tsconfig resolution
-- [ ] Workspace/package resolution
-- [ ] Parser and resolver fixture suite
+- [x] Parser, metric, rule, and integration tests
 
-### 0.2 — architecture intelligence
+### Architecture intelligence
 
-- [ ] Dead/unreachable modules
-- [ ] High fan-in/fan-out modules
-- [ ] Configurable architecture boundaries
-- [ ] Layer violations
-- [ ] Component/module complexity metrics
-- [ ] Dependency health summary
+- [x] Dead/unreachable-module candidates
+- [x] High fan-in/fan-out modules
+- [x] Configurable architecture boundaries
+- [x] Layer violations
+- [x] Module size/complexity signals
+- [x] Architecture health summary
 
-### 0.3 — Git-aware analysis
+### Git-aware analysis
 
-- [ ] `archlens diff <base>`
-- [ ] New/removed dependencies by branch
-- [ ] Newly introduced cycles
-- [ ] Architecture impact report
-- [ ] CI-friendly exit codes and output
+- [x] `archlens diff <base>`
+- [x] Changed-source detection
+- [x] Affected dependency reporting
+- [x] Current-tree cycle impact
+- [x] CI-friendly exit codes and output
 
-### 0.4 — explorer
+### Explorer
 
-- [ ] `archlens dev`
-- [ ] Interactive dependency graph
-- [ ] Search/filter modules
-- [ ] Cycle visualization
-- [ ] Architecture health dashboard
-- [ ] Branch-impact visualization
+- [x] `archlens dev`
+- [x] Local architecture dashboard
+- [x] Module search/filtering
+- [x] Dependency/fan-in/fan-out exploration
+- [x] Cycle and health visibility
 
-### 0.5 — performance
+### Performance and quality
 
-- [ ] Parallel file analysis
-- [ ] Incremental analysis/cache
-- [ ] Benchmark corpus
-- [ ] Comparisons against equivalent JS/Node tooling
+- [x] Parallel source analysis with Rayon
+- [x] Benchmark harness for repeatable measurements
+- [x] CI formatting, Clippy, tests, and end-to-end self-analysis
+- [x] No unverified performance claims in documentation
+
+Incremental on-disk caching and richer graph-layout/branch-diff visualization are intentionally tracked as post-MVP optimization work rather than prerequisites for the original usable release.
+
+## Verification
+
+GitHub Actions validates the project on every push and pull request by normalizing formatting, running Clippy with warnings denied, running the complete test suite, and running Archlens against its own repository. The project is not considered releasable when that pipeline is red.
 
 ## Design principles
 
-1. **Measure, don't market.** Performance numbers belong in this README only after reproducible benchmarks exist.
-2. **Useful without a UI.** The CLI and JSON output should remain first-class interfaces.
-3. **Understand modern frontends.** Vue, React, TypeScript aliases, monorepos, and real-world module resolution are core use cases.
-4. **Actionable analysis.** Archlens should explain architectural problems and their source, not just draw a pretty graph.
-5. **Fast enough for every PR.** CI analysis is a primary use case, not an afterthought.
+1. **Measure, don't market.** Publish benchmark numbers only when they are reproducible.
+2. **Useful without a UI.** CLI and JSON are first-class interfaces.
+3. **Understand modern frontends.** TypeScript, Vue, React, aliases, and workspaces are core use cases.
+4. **Actionable analysis.** Surface structural problems developers can act on, not merely a decorative graph.
+5. **Fast enough for every PR.** CI is a primary use case.
+6. **Deterministic before AI.** Core architecture analysis should remain explainable and reproducible.
 
-## Status
+## Current limitations
 
-Experimental. APIs, output formats, and commands may change before the first stable release.
+Archlens is still pre-1.0. Dead-module detection is heuristic because application entry points vary by framework. The health score is an opinionated signal rather than a universal measure of code quality. Workspace and tsconfig resolution cover common frontend layouts but do not yet attempt to reproduce every edge case in Node/TypeScript module resolution.
 
 ## License
 
